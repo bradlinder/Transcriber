@@ -415,6 +415,10 @@ object TranscriptionRun {
     fun setWordThreshold(wordThreshold: Int) {
         _state.update { it?.copy(wordThreshold = wordThreshold) }
     }
+
+    fun setHistoryId(historyId: String) {
+        _state.update { it?.copy(historyId = historyId) }
+    }
 }
 
 private const val METRICS_INTERVAL_MS = 500L

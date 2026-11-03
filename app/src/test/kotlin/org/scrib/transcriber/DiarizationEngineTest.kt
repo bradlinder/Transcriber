@@ -642,4 +642,88 @@ class DiarizationEngineTest {
         assertEquals("Speaker 1", split[0].speaker)
         assertEquals("Speaker 2", split[1].speaker)
     }
+
+    @Test
+    fun testActiveSpeechRmsNormalizationBalancesDynamicRange() {
+        val hp = DiarizationEngine.HighpassFilter85Hz()
+        val sampleRate = 16000
+        val numSamples = 2 * sampleRate
+
+        // 1. Quiet off-mic audio (peak amplitude = 0.04)
+        val quietPcm = FloatArray(numSamples) { i ->
+            (kotlin.math.sin(2.0 * Math.PI * 250.0 * i / sampleRate) * 0.04).toFloat()
+        }
+
+        // 2. Loud on-mic audio with a transient pop/plosive (peak = 0.95, active = 0.40)
+        val loudPcm = FloatArray(numSamples) { i ->
+            val base = (kotlin.math.sin(2.0 * Math.PI * 250.0 * i / sampleRate) * 0.40).toFloat()
+            if (i in 500..510) 0.95f else base
+        }
+
+        val normQuiet = DiarizationEngine.prepareAudioChunk(quietPcm, hp)
+        val normLoud = DiarizationEngine.prepareAudioChunk(loudPcm, hp)
+
+        fun calcActiveRms(pcm: FloatArray): Float {
+            var sumSq = 0.0
+            var count = 0
+            for (x in pcm) {
+                if (kotlin.math.abs(x) > 0.02f) {
+                    sumSq += (x * x).toDouble()
+                    count++
+                }
+            }
+            return if (count > 0) kotlin.math.sqrt(sumSq / count).toFloat() else 0.0f
+        }
+
+        val rmsQuiet = calcActiveRms(normQuiet)
+        val rmsLoud = calcActiveRms(normLoud)
+
+        // Both chunks should have comparable normalized active speech RMS around 0.08 - 0.15
+        assertTrue("Quiet audio RMS ($rmsQuiet) must be boosted to standard speech level (>=0.07)", rmsQuiet >= 0.07f)
+        assertTrue("Loud audio RMS ($rmsLoud) must be tamed to prevent distortion (<=0.20)", rmsLoud <= 0.20f)
+        // Ratio of RMS between on-mic and off-mic should be within 2.5x instead of the original 10x disparity
+        val ratio = if (rmsQuiet > rmsLoud) rmsQuiet / rmsLoud else rmsLoud / rmsQuiet
+        assertTrue("RMS ratio ($ratio) between on-mic and off-mic must be within 2.5x balance", ratio < 2.5f)
+    }
+
+    @Test
+    fun testAverageLinkagePreservesSingleSoundbiteSpeakerInMixedAudio() {
+        // Speaker A: 4 chunks (e.g. narrator or in-person speaker)
+        // Speaker B: 4 chunks (e.g. second in-person speaker)
+        // Speaker C: 1 chunk (e.g. 5-second guest soundbite over Zoom or phone)
+        val dim = 8
+        fun makeVector(primaryIdx: Int, noise: Float): FloatArray {
+            val v = FloatArray(dim)
+            v[primaryIdx] = 1.0f
+            v[(primaryIdx + 1) % dim] = noise
+            var norm = 0.0f
+            for (x in v) norm += x * x
+            val s = kotlin.math.sqrt(norm)
+            for (i in v.indices) v[i] /= s
+            return v
+        }
+
+        val embs = mutableListOf<FloatArray>()
+        // 4 chunks for Speaker A (centered on index 0)
+        embs.add(makeVector(0, 0.05f))
+        embs.add(makeVector(0, 0.08f))
+        embs.add(makeVector(0, 0.03f))
+        embs.add(makeVector(0, 0.06f))
+
+        // 4 chunks for Speaker B (centered on index 3)
+        embs.add(makeVector(3, 0.05f))
+        embs.add(makeVector(3, 0.09f))
+        embs.add(makeVector(3, 0.04f))
+        embs.add(makeVector(3, 0.07f))
+
+        // 1 chunk for Speaker C (centered on index 6)
+        embs.add(makeVector(6, 0.05f))
+
+        val labels = DiarizationEngine.clusterAhcThreshold(embs, threshold = 0.68f)
+        assertEquals("Mixed audio with a single guest soundbite must preserve all 3 speakers", 3, labels.distinct().size)
+        assertEquals("Speaker A chunks must share label", labels[0], labels[1])
+        assertEquals("Speaker B chunks must share label", labels[4], labels[5])
+        assertNotEquals("Guest soundbite (Speaker C) must not be merged into Speaker A", labels[0], labels[8])
+        assertNotEquals("Guest soundbite (Speaker C) must not be merged into Speaker B", labels[4], labels[8])
+    }
 }

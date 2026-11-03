@@ -83,7 +83,8 @@ data class TranscribeUi(
     val wordThreshold: Int = 70,
     val showTimestamps: Boolean = true,
     val showSpeakers: Boolean = true,
-    val colorizeSpeakerLabels: Boolean = false
+    val colorizeSpeakerLabels: Boolean = false,
+    val historyId: String? = null
 ) {
     val formatted: String get() = if (segments.isEmpty()) text else segments.format(format, wordThreshold, showTimestamps, showSpeakers)
 }
@@ -644,7 +645,8 @@ class TranscriberViewModel(app: Application) : AndroidViewModel(app) {
                     if (key != lastAutoSavedRunKey) {
                         lastAutoSavedRunKey = key
                         withContext(Dispatchers.IO) {
-                            TranscriptHistory.save(ctx, current)
+                            val savedEntry = TranscriptHistory.save(ctx, current)
+                            TranscriptionRun.setHistoryId(savedEntry.id)
                             historyCache = null
                         }
                         push()
@@ -803,7 +805,8 @@ class TranscriberViewModel(app: Application) : AndroidViewModel(app) {
         if (transcript.running || transcript.error != null || transcript.text.isBlank()) return
         dismissTranscription()
         viewModelScope.launch(Dispatchers.IO) {
-            TranscriptHistory.save(ctx, transcript)
+            val savedEntry = TranscriptHistory.save(ctx, transcript)
+            TranscriptionRun.setHistoryId(savedEntry.id)
             historyCache = null
             withContext(Dispatchers.Main) {
                 toast(R.string.history_saved)

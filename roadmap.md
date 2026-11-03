@@ -5,7 +5,7 @@ Transcriber is an offline-first, privacy-focused Android application designed fo
 
 ---
 
-## 2. Near-Term Feature Set & Current Version (`v0.64`)
+## 2. Near-Term Feature Set & Current Version (`v0.66`)
 - **Native C++ Engine:** Powered by Scrib's C++ `transcribe.cpp` / `whisper.cpp` / `ggml` runtime.
 - **Sentence-Boundary Paragraph Breaking:** Automatically breaks paragraphs at sentence-ending punctuation (`.?!`) when the configurable word threshold is reached (default 70 words, adjustable from 20 to 200 words in Settings).
 - **Intelligent Sentence Fragment Merger:** Automatically attaches short, lowercase sentence fragments ($\le 2$ words, e.g. `"examples."`) to parent sentences before paragraph breaks.
@@ -305,6 +305,18 @@ Transcriber is an offline-first, privacy-focused Android application designed fo
   - Full APK Signature Enforcement: Explicitly enabled `v1SigningEnabled true`, `v2SigningEnabled true`, `v3SigningEnabled true`, and `v4SigningEnabled true` under `signingConfigs.release` in `app/build.gradle`.
   - Version Synchronization: Updated application versioning to `v0.64` (`versionCode 64`) across `app/build.gradle`, `metadata/org.scrib.transcriber.yml`, and `roadmap.md`.
   - Side-Loading & Play Protect Verification Workflow: Prepared production release build for direct side-loading and submission to Google Play Protect Developer Appeals & App Verification portal.
+
+### [x] Priority 45 (COMPLETED in v0.65): Idempotent History Entry Save & Duplicate Transcript Elimination
+- **Overview:**
+  - Idempotent History Storage: Added `historyId: String?` property to `TranscribeUi` and updated `TranscriptHistory.save()` to reuse existing IDs when saving.
+  - History Entry Synchronization: Synchronized auto-save on 100% completion with `TranscriptionRun.setHistoryId()` so subsequent exit/dismiss actions update the existing entry in place rather than creating duplicate history files on disk.
+
+### [x] Priority 46 (COMPLETED in v0.66): Heterogeneous Audio & VoIP Diarization Robustness
+- **Overview:**
+  - Active Speech RMS Normalization: Implemented voiced-sample RMS loudness scaling to eliminate dynamic range disparities between close on-mic, distant off-mic, and AGC-compressed Zoom/VoIP speech.
+  - Uniform Multi-Window Averaging: Slices all turns >= 1.2s into 1.5s sliding windows (0.75s step) to average CAM++ voiceprint embeddings and cancel transient codec jitter.
+  - Elimination of Single-Soundbite Outlier Erasure: Replaced the 1-chunk cluster suppression rule with duration-grounded preservation (>= 1.0s) so brief guest remarks and Zoom quotes are never collapsed into other speakers.
+  - Average Linkage (UPGMA) & Adaptive Dendrogram Gap Detection: Switched from centroid gravitational merging to unweighted pairwise average distance with adaptive knee-point acceleration stopping in Auto mode.
 
 ---
 

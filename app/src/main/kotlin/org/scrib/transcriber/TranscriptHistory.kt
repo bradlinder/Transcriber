@@ -19,8 +19,10 @@ object TranscriptHistory {
     )
 
     fun save(context: Context, transcript: TranscribeUi): Entry {
+        val entryId = transcript.historyId?.takeIf { it.isNotBlank() }
+            ?: (System.currentTimeMillis().toString(36) + "-" + (0..9999).random())
         val entry = Entry(
-            id = System.currentTimeMillis().toString(36) + "-" + (0..9999).random(),
+            id = entryId,
             savedAtMs = System.currentTimeMillis(),
             fileName = transcript.fileName,
             modelName = transcript.modelName,

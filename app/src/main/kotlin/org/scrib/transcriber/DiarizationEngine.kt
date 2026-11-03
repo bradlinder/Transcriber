@@ -314,13 +314,13 @@ object DiarizationEngine {
             if (durMs < 800L) {
                 // Short fragments (< 0.8s, like "Yeah.") are isolated to prevent skewing primary clusters
                 shortChunks.add(s)
-            } else if (durMs > 6000L) {
-                // Window long turns into 3s slices with 1.5s hop (matches rtvs3 desktop)
+            } else if (durMs >= 3000L) {
+                // Window turns >= 3.0s into 2.5s slices with 1.25s hop for stable multi-window voiceprints
                 var currStart = s.startMs
                 while (currStart + 1000L < s.endMs) {
-                    val currEnd = min(currStart + 3000L, s.endMs)
+                    val currEnd = min(currStart + 2500L, s.endMs)
                     primaryChunks.add(s.copy(startMs = currStart, endMs = currEnd))
-                    currStart += 1500L
+                    currStart += 1250L
                 }
             } else {
                 primaryChunks.add(s)
@@ -384,33 +384,16 @@ object DiarizationEngine {
 
             // Compute centroids for each formed primary cluster
             val uniqueClusterIds = primaryLabels.distinct().sorted()
-            val clusterCounts = primaryLabels.groupBy { it }.mapValues { it.value.size }
-
-            // Major clusters represent conversational speech (>= 2 chunks or >= 2% of speech)
-            val majorClusterIds = uniqueClusterIds.filter { id ->
-                val count = clusterCounts[id] ?: 0
-                count >= 2 || (count.toFloat() / primaryEmbeddings.size) >= 0.02f
-            }.ifEmpty { uniqueClusterIds }
 
             val centroids = mutableMapOf<Int, FloatArray>()
-            for (clusterId in majorClusterIds) {
+            for (clusterId in uniqueClusterIds) {
                 val clusterEmbs = primaryEmbeddings.filterIndexed { i, _ -> primaryLabels[i] == clusterId }
                 centroids[clusterId] = computeCentroid(clusterEmbs)
             }
 
-            // Re-assign isolated 1-chunk outlier clusters to the nearest dominant speaker centroid
-            val refinedLabels = IntArray(primaryLabels.size)
-            for (i in primaryLabels.indices) {
-                val origCluster = primaryLabels[i]
-                if (origCluster in majorClusterIds) {
-                    refinedLabels[i] = origCluster
-                } else if (centroids.isNotEmpty()) {
-                    val emb = primaryEmbeddings[i]
-                    refinedLabels[i] = centroids.maxByOrNull { (_, c) -> dotProduct(emb, c) }?.key ?: origCluster
-                } else {
-                    refinedLabels[i] = origCluster
-                }
-            }
+            // In mixed audio (interviews, field tape, Zoom calls), every valid primary speech chunk (>= 0.8s)
+            // represents a genuine speaker turn. Preserve all valid clusters without forced outlier erasure.
+            val refinedLabels = primaryLabels
 
             // Assign short utterances (< 0.8s, e.g. "Yeah.") to the closest centroid using padded audio context
             val allSpans = mutableListOf<DiarSpan>()
@@ -494,33 +477,29 @@ object DiarizationEngine {
         if (n <= k) return IntArray(n) { it }
         val dim = embeddings[0].size
 
-        val centroids = Array(n) { i -> embeddings[i].clone() }
+        val sumVectors = Array(n) { i -> embeddings[i].clone() }
         val members = Array(n) { i -> mutableListOf(i) }
         val active = BooleanArray(n) { true }
         var activeCount = n
 
-        fun centroidDist(i: Int, j: Int): Float {
-            val ci = centroids[i]
-            val cj = centroids[j]
+        // Average Linkage (UPGMA): mean pairwise cosine distance between cluster members
+        fun avgDist(i: Int, j: Int): Float {
+            val sI = sumVectors[i]
+            val sJ = sumVectors[j]
             var dot = 0.0f
-            var normI = 0.0f
-            var normJ = 0.0f
             for (d in 0 until dim) {
-                val vi = ci[d]
-                val vj = cj[d]
-                dot += vi * vj
-                normI += vi * vi
-                normJ += vj * vj
+                dot += sI[d] * sJ[d]
             }
-            if (normI < 1e-12f || normJ < 1e-12f) return 1.0f
-            val sim = dot / (sqrt(normI) * sqrt(normJ))
-            return 1.0f - sim.coerceIn(-1.0f, 1.0f)
+            val countI = members[i].size
+            val countJ = members[j].size
+            val avgSim = dot / (countI * countJ)
+            return 1.0f - avgSim.coerceIn(-1.0f, 1.0f)
         }
 
         val distMatrix = Array(n) { FloatArray(n) }
         for (i in 0 until n) {
             for (j in i + 1 until n) {
-                val d = centroidDist(i, j)
+                val d = avgDist(i, j)
                 distMatrix[i][j] = d
                 distMatrix[j][i] = d
             }
@@ -567,10 +546,10 @@ object DiarizationEngine {
                 continue
             }
 
-            val cI = centroids[bestI]
-            val cJ = centroids[bestJ]
+            val sI = sumVectors[bestI]
+            val sJ = sumVectors[bestJ]
             for (d in 0 until dim) {
-                cI[d] += cJ[d]
+                sI[d] += sJ[d]
             }
             members[bestI].addAll(members[bestJ])
             active[bestJ] = false
@@ -579,7 +558,7 @@ object DiarizationEngine {
             val rowI = distMatrix[bestI]
             for (idx in 0 until n) {
                 if (idx != bestI && active[idx]) {
-                    val d = centroidDist(bestI, idx)
+                    val d = avgDist(bestI, idx)
                     rowI[idx] = d
                     distMatrix[idx][bestI] = d
                     if (nearest[idx] == bestJ || nearest[idx] == bestI) {
@@ -611,33 +590,29 @@ object DiarizationEngine {
         if (n <= minK) return IntArray(n) { 0 }
         val dim = embeddings[0].size
 
-        val centroids = Array(n) { i -> embeddings[i].clone() }
+        val sumVectors = Array(n) { i -> embeddings[i].clone() }
         val members = Array(n) { i -> mutableListOf(i) }
         val active = BooleanArray(n) { true }
         var activeCount = n
 
-        fun centroidDist(i: Int, j: Int): Float {
-            val ci = centroids[i]
-            val cj = centroids[j]
+        // Average Linkage (UPGMA): mean pairwise cosine distance between cluster members
+        fun avgDist(i: Int, j: Int): Float {
+            val sI = sumVectors[i]
+            val sJ = sumVectors[j]
             var dot = 0.0f
-            var normI = 0.0f
-            var normJ = 0.0f
             for (d in 0 until dim) {
-                val vi = ci[d]
-                val vj = cj[d]
-                dot += vi * vj
-                normI += vi * vi
-                normJ += vj * vj
+                dot += sI[d] * sJ[d]
             }
-            if (normI < 1e-12f || normJ < 1e-12f) return 1.0f
-            val sim = dot / (sqrt(normI) * sqrt(normJ))
-            return 1.0f - sim.coerceIn(-1.0f, 1.0f)
+            val countI = members[i].size
+            val countJ = members[j].size
+            val avgSim = dot / (countI * countJ)
+            return 1.0f - avgSim.coerceIn(-1.0f, 1.0f)
         }
 
         val distMatrix = Array(n) { FloatArray(n) }
         for (i in 0 until n) {
             for (j in i + 1 until n) {
-                val d = centroidDist(i, j)
+                val d = avgDist(i, j)
                 distMatrix[i][j] = d
                 distMatrix[j][i] = d
             }
@@ -667,6 +642,7 @@ object DiarizationEngine {
             updateNearest(i)
         }
 
+        val mergeHistory = mutableListOf<Float>()
         while (activeCount > minK) {
             var globalMinD = Float.MAX_VALUE
             var bestI = -1
@@ -678,16 +654,30 @@ object DiarizationEngine {
             }
 
             if (globalMinD > threshold || bestI == -1) break
+
+            // Adaptive knee-point detection in Auto mode (minK == 1):
+            // When transitioning from intra-speaker to inter-speaker merges, a distinct distance jump occurs.
+            if (minK == 1 && mergeHistory.size >= 2 && globalMinD > 0.42f) {
+                val lastD = mergeHistory.last()
+                val delta = globalMinD - lastD
+                val prevAvgStep = (lastD - mergeHistory.first()) / mergeHistory.size
+                if (delta >= 0.14f && delta > 2.0f * max(0.02f, prevAvgStep)) {
+                    Log.i(TAG, "Adaptive knee-point detected at distance=$globalMinD (prev=$lastD, delta=$delta). Halting merges at $activeCount clusters.")
+                    break
+                }
+            }
+            mergeHistory.add(globalMinD)
+
             val bestJ = nearest[bestI]
             if (bestJ == -1 || !active[bestJ]) {
                 updateNearest(bestI)
                 continue
             }
 
-            val cI = centroids[bestI]
-            val cJ = centroids[bestJ]
+            val sI = sumVectors[bestI]
+            val sJ = sumVectors[bestJ]
             for (d in 0 until dim) {
-                cI[d] += cJ[d]
+                sI[d] += sJ[d]
             }
             members[bestI].addAll(members[bestJ])
             active[bestJ] = false
@@ -696,7 +686,7 @@ object DiarizationEngine {
             val rowI = distMatrix[bestI]
             for (idx in 0 until n) {
                 if (idx != bestI && active[idx]) {
-                    val d = centroidDist(bestI, idx)
+                    val d = avgDist(bestI, idx)
                     rowI[idx] = d
                     distMatrix[idx][bestI] = d
                     if (nearest[idx] == bestJ || nearest[idx] == bestI) {
@@ -739,19 +729,42 @@ object DiarizationEngine {
         return centroid
     }
 
-    // 85 Hz Highpass Filter + Peak Normalization for dynamic loud/quiet speaker balance
+    // 85 Hz Highpass Filter + Active-Speech RMS Normalization for balanced dynamic range
+    // across on-mic, distant off-mic, and AGC-compressed Zoom/VoIP audio
     internal fun prepareAudioChunk(rawPcm: FloatArray, highpass: HighpassFilter85Hz): FloatArray {
         val filtered = highpass.filter(rawPcm)
+        if (filtered.isEmpty()) return filtered
+
         var maxPeak = 0.0f
         for (x in filtered) {
             val a = abs(x)
             if (a > maxPeak) maxPeak = a
         }
-        if (maxPeak > 1e-4f) {
-            val scale = 0.75f / maxPeak
-            for (i in filtered.indices) {
-                filtered[i] *= scale
+        if (maxPeak < 1e-4f) return filtered
+
+        // Active speech energy calculation (samples >= 10% of peak, ignoring ambient pauses)
+        val silenceThresh = maxPeak * 0.10f
+        var sumSq = 0.0
+        var activeCount = 0
+        for (x in filtered) {
+            val a = abs(x)
+            if (a >= silenceThresh) {
+                sumSq += (a * a).toDouble()
+                activeCount++
             }
+        }
+
+        val activeRms = if (activeCount > 0) sqrt(sumSq / activeCount).toFloat() else maxPeak
+        val targetRms = 0.10f
+        var scale = if (activeRms > 1e-4f) targetRms / activeRms else 0.75f / maxPeak
+
+        // Prevent clipping if transients exceed 0.95
+        if (maxPeak * scale > 0.95f) {
+            scale = 0.95f / maxPeak
+        }
+
+        for (i in filtered.indices) {
+            filtered[i] *= scale
         }
         return filtered
     }
@@ -764,9 +777,9 @@ object DiarizationEngine {
         audio: FloatArray,
         sampleRate: Int = 16000
     ): FloatArray? {
-        val windowSamples = (1.2f * sampleRate).toInt()
-        val stepSamples = (0.6f * sampleRate).toInt()
-        val minSegmentSamples = (0.4f * sampleRate).toInt()
+        val windowSamples = (1.5f * sampleRate).toInt()
+        val stepSamples = (0.75f * sampleRate).toInt()
+        val minSegmentSamples = (0.5f * sampleRate).toInt()
 
         if (audio.size <= (1.8f * sampleRate).toInt()) {
             return extractEmbedding(session, env, audio)
