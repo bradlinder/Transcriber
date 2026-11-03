@@ -69,7 +69,7 @@ class TranscriptionForegroundService : Service() {
         val builder = Notification.Builder(this, CHANNEL_ID)
             .setContentTitle(state?.fileName ?: getString(R.string.notif_transcribing))
             .setContentText(progressLine(state))
-            .setSmallIcon(android.R.drawable.stat_sys_download)
+            .setSmallIcon(R.drawable.ic_tab_graphic_eq)
             .setContentIntent(open)
             .setOngoing(true)
             .setOnlyAlertOnce(true)

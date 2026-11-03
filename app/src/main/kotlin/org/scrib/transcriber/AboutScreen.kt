@@ -49,18 +49,23 @@ fun AboutScreen(onBack: () -> Unit) {
             Body(stringResource(if (BuildConfig.ENDPOINTS_ONLY) R.string.about_own_b_remote else R.string.about_own_b))
             SubHeading(stringResource(R.string.about_engine_h))
             Body(stringResource(if (BuildConfig.ENDPOINTS_ONLY) R.string.about_engine_b_remote else R.string.about_engine_b))
-            SubHeading(stringResource(R.string.about_keyboard_h))
-            Body(stringResource(R.string.about_keyboard_b))
 
             Spacer(Modifier.height(22.dp))
             Heading(stringResource(if (BuildConfig.ENDPOINTS_ONLY) R.string.about_endpoint_h else R.string.about_models_h))
             Body(stringResource(if (BuildConfig.ENDPOINTS_ONLY) R.string.about_endpoint_b else R.string.about_models_b))
 
             Spacer(Modifier.height(22.dp))
+            Heading(stringResource(R.string.about_diarization_h))
+            Body(stringResource(R.string.about_diarization_b))
+
+            Spacer(Modifier.height(22.dp))
             Heading(stringResource(R.string.about_dev_h))
             Body(stringResource(R.string.about_dev_b))
 
-            Spacer(Modifier.height(28.dp))
+            Spacer(Modifier.height(24.dp))
+            Body(stringResource(R.string.about_fork_note))
+
+            Spacer(Modifier.height(16.dp))
             Text(stringResource(R.string.about_version, BuildConfig.VERSION_NAME), fontSize = 12.sp, color = cs.onSurfaceVariant)
             Spacer(Modifier.height(24.dp))
         }

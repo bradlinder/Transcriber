@@ -33,7 +33,25 @@ object ModelManager {
             dir.mkdirs()
         }
         migrateLegacy(context, dir)
+        installPrebundledModels(context, dir)
         return dir
+    }
+
+    private fun installPrebundledModels(context: Context, dir: File) {
+        try {
+            val assetFiles = context.assets.list("models/diarization") ?: emptyArray()
+            val diarDir = File(dir, "diarization").apply { mkdirs() }
+            for (filename in assetFiles) {
+                val destFile = File(diarDir, filename)
+                if (!destFile.exists() || destFile.length() <= 100) {
+                    context.assets.open("models/diarization/$filename").use { input ->
+                        java.io.FileOutputStream(destFile).use { output ->
+                            input.copyTo(output)
+                        }
+                    }
+                }
+            }
+        } catch (_: Exception) {}
     }
 
     private fun migrateLegacy(context: Context, dir: File) {
@@ -288,6 +306,45 @@ object ModelManager {
             .putBoolean(KEY_SKIP_SILENCE, enabled).apply()
     }
 
+    fun paragraphWordThreshold(context: Context): Int =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt("paragraphWordThreshold", 70)
+
+    fun setParagraphWordThreshold(context: Context, threshold: Int) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putInt("paragraphWordThreshold", threshold.coerceIn(20, 200)).apply()
+    }
+
+    fun diarizationSensitivityThreshold(context: Context): Float {
+        val sens = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString("diarizationSensitivity", "normal") ?: "normal"
+        return when (sens.lowercase()) {
+            "low" -> 0.78f       // Aggressive merging; handles high room acoustics/distance variance
+            "normal" -> 0.68f    // Calibrated WeSpeaker baseline matching desktop rtvs3
+            "high" -> 0.58f      // Strict; separates subtle voice differences
+            "very_high" -> 0.48f // Aggressive separation
+            "ultra" -> 0.38f     // Maximum distinction
+            else -> 0.68f
+        }
+    }
+
+    fun diarizationSensitivityKey(context: Context): String =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString("diarizationSensitivity", "normal") ?: "normal"
+
+    fun setDiarizationSensitivity(context: Context, sensKey: String) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString("diarizationSensitivity", sensKey).apply()
+    }
+
+    fun expectedSpeakersKey(context: Context): String =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString("expectedSpeakers", "auto") ?: "auto"
+
+    fun setExpectedSpeakers(context: Context, key: String) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString("expectedSpeakers", key).apply()
+    }
+
     // Sampling the process means two binder calls into system_server, so it costs real time on a
     // phone with little memory to spare. On by default — the figures are the whole point of the
     // benchmark history — but switchable, so its weight on a run can be measured by turning it off.
@@ -315,6 +372,18 @@ object ModelManager {
     // The path to hand the engine, or null when silence is to be decoded along with everything else.
     // The model can go missing after the setting was turned on — a cleared app storage, a restore
     // onto another phone — so the file is checked, not just the preference.
+    fun wespeakerModelPath(context: Context): String? {
+        val file = File(File(modelsDir(context), "diarization"), "wespeaker_en_voxceleb_CAM++.onnx")
+        if (file.exists() && file.length() > 1000) {
+            return file.absolutePath
+        }
+        val assetFallback = File("src/main/assets/models/diarization/wespeaker_en_voxceleb_CAM++.onnx")
+        if (assetFallback.exists() && assetFallback.length() > 1000) {
+            return assetFallback.absolutePath
+        }
+        return null
+    }
+
     fun vadModelPath(context: Context): String? {
         if (!skipSilence(context) || !isVadInstalled(context)) {
             return null
@@ -462,6 +531,42 @@ object ModelManager {
             setActive(context, name)
         }
         return name
+    }
+
+    private const val KEY_THEME = "appTheme"
+    private const val KEY_DEFAULT_FORMAT = "defaultExportFormat"
+    private const val KEY_ENABLED_FORMATS = "enabledExportFormats"
+    private const val KEY_COLORIZE_SPEAKER_LABELS = "colorizeSpeakerLabels"
+
+    fun colorizeSpeakerLabels(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_COLORIZE_SPEAKER_LABELS, false)
+
+    fun setColorizeSpeakerLabels(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_COLORIZE_SPEAKER_LABELS, enabled).apply()
+    }
+
+    fun appTheme(context: Context): String =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_THEME, "system") ?: "system"
+
+    fun setAppTheme(context: Context, theme: String) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_THEME, theme).apply()
+    }
+
+    fun defaultExportFormat(context: Context): String =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_DEFAULT_FORMAT, "docx") ?: "docx"
+
+    fun setDefaultExportFormat(context: Context, format: String) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_DEFAULT_FORMAT, format).apply()
+    }
+
+    fun enabledExportFormats(context: Context): Set<String> {
+        val raw = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_ENABLED_FORMATS, "docx,txt,srt,vtt,lrc") ?: "docx,txt,srt,vtt,lrc"
+        return raw.split(",").map { it.trim().lowercase() }.filter { it.isNotBlank() }.toSet()
+    }
+
+    fun setEnabledExportFormats(context: Context, formats: Set<String>) {
+        val raw = formats.joinToString(",")
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_ENABLED_FORMATS, raw).apply()
     }
 
     class CancelledDownloadException : RuntimeException()

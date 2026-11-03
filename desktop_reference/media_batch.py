@@ -1,0 +1,1699 @@
+"""Radio & TV Segmenter v1.1.1 — media batch responsibilities.
+
+Methods intentionally retain the MainWindow-facing API so behavior remains
+maintaining the established MainWindow-facing API while responsibilities are isolated.
+"""
+
+from PySide6.QtCore import Qt, QThread, QTimer
+from PySide6.QtWidgets import (
+    QApplication, QDialog, QFileDialog, QLabel, QMessageBox, QPushButton, QWidget
+)
+from prs_shared import *
+from background_workers import (
+    get_video_thumbnail_cache_dir,
+    read_video_thumbnail_cache,
+    invalidate_video_thumbnail_cache,
+)
+
+
+class MediaBatchMixin:
+    def probe_media_duration(self, path):
+        """Probe duration locally so video timelines can be populated immediately."""
+        try:
+            creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+            result = subprocess.run(
+                [ffprobe_path() or "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5, check=True,
+                creationflags=creationflags,
+            )
+            value = float(result.stdout.strip())
+            return value if value > 0 else None
+        except Exception:
+            return None
+
+    def _track_worker_thread(self, thread):
+        """Keep a strong reference to active worker threads so Python GC never destroys them while executing."""
+        if not hasattr(self, "_active_worker_threads"):
+            self._active_worker_threads = set()
+        if thread is not None:
+            self._active_worker_threads.add(thread)
+            def _cleanup():
+                if thread in self._active_worker_threads:
+                    if not thread.isRunning():
+                        self._active_worker_threads.discard(thread)
+                    else:
+                        QTimer.singleShot(200, _cleanup)
+            thread.finished.connect(lambda: QTimer.singleShot(100, _cleanup))
+
+    def stop_waveform_worker(self, timeout_ms=5000):
+        """Stop the current waveform worker completely before replacing it or closing."""
+        thread = getattr(self, "wf_thread", None)
+        worker = getattr(self, "wf_worker", None)
+        if thread is None:
+            return True
+
+        if thread.isRunning():
+            if worker is not None:
+                try:
+                    worker.cancel()
+                except Exception:
+                    pass
+            thread.quit()
+            if not thread.wait(timeout_ms):
+                if worker is not None:
+                    try:
+                        worker.cancel()
+                    except Exception:
+                        pass
+                if not thread.wait(1000):
+                    self.log_activity("[WARNING] Waveform worker did not stop within the normal shutdown window; leaving it tracked until Qt finishes cleanup.", mark_dirty=False)
+                    return False
+
+        if hasattr(self, "timeline"):
+            try:
+                self.timeline.set_background_generation_active("waveform", False)
+            except Exception:
+                pass
+        self.wf_thread = None
+        self.wf_worker = None
+        return True
+
+    def start_video_thumbnail_generation(self, force_regenerate: bool = False):
+        if not self.current_media_is_video or not self.audio_file or self.duration <= 0:
+            if hasattr(self, "timeline"):
+                self.timeline.set_video_thumbnails([])
+            return
+
+        if not force_regenerate:
+            cached_thumbs = read_video_thumbnail_cache(self.audio_file, self.duration)
+            if cached_thumbs:
+                self.video_thumbnail_dir = get_video_thumbnail_cache_dir(self.audio_file)
+                if self.video_thumbnail_dir:
+                    register_active_thumbnail_dir(self.video_thumbnail_dir)
+                if hasattr(self, "timeline"):
+                    try:
+                        self.timeline.set_background_generation_active("thumbnails", False)
+                    except Exception:
+                        pass
+                    self.timeline.set_video_thumbnails(cached_thumbs)
+                self.log_activity(f"[MEDIA] Loaded {len(cached_thumbs)} cached video thumbnails.", mark_dirty=False)
+                return
+
+        if not self.stop_video_thumbnail_worker():
+            self._pending_thumbnail_restart = True
+            self.log_activity("[MEDIA] Previous thumbnail worker is still stopping; thumbnail generation will restart once it finishes.", mark_dirty=False)
+            return
+        try:
+            job = get_video_thumbnail_cache_dir(self.audio_file)
+            if job is None:
+                base = Path(tempfile.gettempdir()) / "radio_tv_story_segmenter_thumbnails"
+                base.mkdir(parents=True, exist_ok=True)
+                job = base / hashlib.sha1(str(self.audio_file).encode("utf-8")).hexdigest()[:16]
+            if job.exists():
+                shutil.rmtree(job, ignore_errors=True)
+            job.mkdir(parents=True, exist_ok=True)
+            self.video_thumbnail_dir = job
+            register_active_thumbnail_dir(self.video_thumbnail_dir)
+            thread = QThread(self)
+            worker = VideoThumbnailWorker(self.audio_file, self.duration, job)
+            worker.moveToThread(thread)
+            self.video_thumbnail_thread = thread
+            self.video_thumbnail_worker = worker
+            self._track_worker_thread(thread)
+
+            thread.started.connect(worker.run)
+            worker.finished.connect(self._video_thumbnails_finished)
+            worker.finished.connect(thread.quit)
+            worker.error.connect(lambda msg: self.log_activity(f"[MEDIA] Video thumbnail generation failed: {msg}", mark_dirty=False))
+            worker.error.connect(thread.quit)
+            thread.finished.connect(self._video_thumbnail_thread_finished)
+            if hasattr(self, "timeline"):
+                try:
+                    self.timeline.set_background_generation_active("thumbnails", True)
+                except Exception:
+                    pass
+            thread.start()
+        except Exception as exc:
+            self.log_activity(f"[MEDIA] Could not start thumbnail generation: {exc}", mark_dirty=False)
+
+    def _video_thumbnail_thread_finished(self):
+        thread = self.sender()
+        if thread is getattr(self, "video_thumbnail_thread", None):
+            self.video_thumbnail_thread = None
+            self.video_thumbnail_worker = None
+        if getattr(self, "_pending_thumbnail_restart", False):
+            self._pending_thumbnail_restart = False
+            QTimer.singleShot(50, self.start_video_thumbnail_generation)
+
+    def _video_thumbnails_finished(self, items):
+        if hasattr(self, "timeline"):
+            try:
+                self.timeline.set_background_generation_active("thumbnails", False)
+            except Exception:
+                pass
+            self.timeline.set_video_thumbnails(items)
+
+    def stop_video_thumbnail_worker(self, timeout_ms=3000):
+        thread = getattr(self, "video_thumbnail_thread", None)
+        worker = getattr(self, "video_thumbnail_worker", None)
+        if thread is None:
+            return True
+        if worker:
+            try:
+                worker.cancel()
+            except Exception:
+                pass
+        if thread.isRunning():
+            thread.quit()
+            if not thread.wait(timeout_ms):
+                if worker:
+                    try:
+                        worker.cancel()
+                    except Exception:
+                        pass
+                if not thread.wait(1000):
+                    self.log_activity("[WARNING] Video thumbnail worker did not finish in time.", mark_dirty=False)
+                    return False
+        if hasattr(self, "timeline"):
+            try:
+                self.timeline.set_background_generation_active("thumbnails", False)
+            except Exception:
+                pass
+        self.video_thumbnail_thread = None
+        self.video_thumbnail_worker = None
+        return True
+
+    def regenerate_waveform(self):
+        """Force recalculation of waveform peaks by clearing disk cache and restarting generation."""
+        if not getattr(self, "audio_file", None):
+            return
+        invalidate_waveform_peak_cache(self.audio_file)
+        if hasattr(self, "timeline"):
+            self.timeline.set_waveform_peaks([])
+        self.log_activity("[WAVEFORM] Manually regenerating waveform from audio source...")
+        is_es = getattr(self, "language", "en") == "es"
+        self.statusBar().showMessage("Regenerando forma de onda..." if is_es else "Regenerating waveform...")
+        self.load_waveform_async(force_regenerate=True)
+
+    def regenerate_video_thumbnails(self):
+        """Force regeneration of video filmstrip thumbnails."""
+        if not getattr(self, "audio_file", None) or not getattr(self, "current_media_is_video", False):
+            return
+        self.stop_video_thumbnail_worker()
+        if hasattr(self, "timeline"):
+            self.timeline.set_video_thumbnails([])
+        invalidate_video_thumbnail_cache(self.audio_file)
+        unregister_active_thumbnail_dir(self.video_thumbnail_dir)
+        self.video_thumbnail_dir = None
+        self.log_activity("[MEDIA] Manually regenerating video thumbnails...")
+        is_es = getattr(self, "language", "en") == "es"
+        self.statusBar().showMessage("Regenerando miniaturas de video..." if is_es else "Regenerating video thumbnails...")
+        self.start_video_thumbnail_generation(force_regenerate=True)
+
+    def load_waveform_async(self, force_regenerate: bool = False):
+        if not self.audio_file:
+            return
+
+        if not force_regenerate:
+            cached_peaks = read_waveform_peak_cache(self.audio_file)
+            if cached_peaks:
+                if hasattr(self, "timeline"):
+                    try:
+                        self.timeline.set_background_generation_active("waveform", False)
+                    except Exception:
+                        pass
+                    self.timeline.set_waveform_peaks(cached_peaks)
+                self.log_activity(f"[WAVEFORM] Loaded cached waveform ({len(cached_peaks):,} peaks).", mark_dirty=False)
+                return
+
+        # Never replace an active QThread. This is the critical lifetime rule
+        # that prevents "QThread: Destroyed while thread is still running".
+        if not self.stop_waveform_worker():
+            self.log_activity("[ERROR] Could not safely stop the previous waveform worker; waveform generation was not restarted.")
+            return
+
+        thread = QThread(self)
+        worker = WaveformWorker(self.audio_file)
+        worker.moveToThread(thread)
+        self.wf_thread = thread
+        self.wf_worker = worker
+        self._track_worker_thread(thread)
+
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._waveform_finished)
+        worker.finished.connect(thread.quit)
+        thread.finished.connect(self._waveform_thread_finished)
+        if hasattr(self, "timeline"):
+            try:
+                self.timeline.set_background_generation_active("waveform", True)
+            except Exception:
+                pass
+        thread.start()
+
+    def _waveform_finished(self, peaks, cancelled=False):
+        if hasattr(self, "timeline"):
+            try:
+                self.timeline.set_background_generation_active("waveform", False)
+            except Exception:
+                pass
+        if cancelled:
+            self.log_activity("[WAVEFORM] Waveform generation canceled.")
+            return
+        self.timeline.set_waveform_peaks(peaks)
+        if peaks:
+            self.log_activity(f"[WAVEFORM] Waveform generation complete ({len(peaks):,} peaks).")
+        else:
+            self.log_activity("[ERROR] Waveform generation produced no audio data. The media may not contain a readable audio stream.")
+
+    def _waveform_thread_finished(self):
+        thread = self.sender()
+        if thread is getattr(self, "wf_thread", None):
+            self.wf_thread = None
+            self.wf_worker = None
+
+    def open_batch_processing_dialog(self):
+        if self.batch_active:
+            QMessageBox.information(self, "Batch Processing", "A batch job is already running.")
+            return
+
+        dialog = BatchProcessingDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        files = [dialog.files.item(i).text() for i in range(dialog.files.count())]
+        if not files:
+            QMessageBox.warning(self, "Batch Processing", "Add at least one file.")
+            return
+
+        output = dialog.output.text().strip()
+        if not output:
+            output = self.default_project_directory or ""
+            if output:
+                Path(output).mkdir(parents=True, exist_ok=True)
+
+        if output:
+            self._remember_directory(output)
+
+        # Minimize user input: Auto-save active project before starting
+        if self.project_dirty and self.audio_file:
+            self.save_project(force=True)
+
+        import time
+        self.batch_active = True
+        self.batch_total_files = len(files)
+        self.batch_current_file_idx = 0
+        self.batch_start_time = time.monotonic()
+        self.batch_completed_durations = []
+        self.batch_file_start_time = None
+
+        # Mute and stop media player during batch runs to prevent GPU/Audio engine contention
+        if hasattr(self, "player") and self.player:
+            self.player.stop()
+            self.player.setSource(QUrl())
+        self.batch_queue = files
+        self.progress.show()
+        self.cancel_button.show()
+        
+        scope = dialog.scope_combo.currentData()
+        pipeline_mode = "custom" if dialog.pipeline_custom_radio.isChecked() else "full"
+        save_project_only = dialog.save_project_only_check.isChecked()
+        save_project = dialog.save_project_check.isChecked() or save_project_only
+
+        unified_transcripts = dialog.unified_transcripts_check.isChecked() and not save_project_only
+        transcripts_output = dialog.transcripts_output.text().strip() if unified_transcripts else ""
+        if unified_transcripts and not transcripts_output and output:
+            transcripts_output = str(Path(output) / "Transcripts")
+
+        do_transcribe = dialog.proc_transcribe.isChecked() if pipeline_mode == "custom" else True
+        do_diarize = dialog.proc_diarize.isChecked() if pipeline_mode == "custom" else True
+        do_stories = dialog.proc_stories.isChecked() if pipeline_mode == "custom" else True
+        translate_pipeline = dialog.proc_translate.isChecked() if pipeline_mode == "custom" else dialog.translate_check.isChecked()
+
+        self.batch_settings = {
+            "output": output,
+            "unified_transcripts": unified_transcripts,
+            "transcripts_output": transcripts_output,
+            "pipeline_mode": pipeline_mode,
+            "save_project_only": save_project_only,
+            "save_project": save_project,
+            "do_transcribe": do_transcribe,
+            "do_diarize": do_diarize,
+            "do_stories": do_stories,
+            "scope": scope,
+            "skip_existing": dialog.skip_existing_check.isChecked() and not save_project_only,
+            "full_txt": dialog.fmt_txt.isChecked() and scope in ("full", "both") and not save_project_only,
+            "full_docx": dialog.fmt_docx.isChecked() and scope in ("full", "both") and not save_project_only,
+            "full_srt": dialog.fmt_srt.isChecked() and scope in ("full", "both") and not save_project_only,
+            "full_vtt": dialog.fmt_vtt.isChecked() and scope in ("full", "both") and not save_project_only,
+            "story_txt": dialog.fmt_txt.isChecked() and scope in ("stories", "both") and not save_project_only,
+            "story_docx": dialog.fmt_docx.isChecked() and scope in ("stories", "both") and not save_project_only,
+            "story_srt": dialog.fmt_srt.isChecked() and scope in ("stories", "both") and not save_project_only,
+            "story_vtt": dialog.fmt_vtt.isChecked() and scope in ("stories", "both") and not save_project_only,
+            "include_speakers": dialog.include_speakers.isChecked(),
+            "include_timestamps": dialog.include_times.isChecked(),
+            "translate_es": translate_pipeline,
+            "translate_stories": translate_pipeline and scope in ("stories", "both"),
+            "expected_speakers": str(dialog.batch_expected_speakers_combo.currentData() or "auto"),
+            "story_gap": dialog.batch_gap_spin.value(),
+            "story_pad": dialog.batch_pad_spin.value(),
+            "translate_direction": str(dialog.batch_export_translate_direction_combo.currentData() or "auto"),
+        }
+
+        # Apply the batch job's per-run Speaker Detection / Story Detection
+        # settings now, so start_diarization()/detect_stories() (which read
+        # these as instance attributes, same as the interactive UI) pick up
+        # the values chosen in this dialog rather than whatever was left
+        # over from Preferences or a previous project.
+        self.expected_speakers = self.batch_settings["expected_speakers"]
+        self.silence_threshold = self.batch_settings["story_gap"]
+        self.lead_in_padding = self.batch_settings["story_pad"]
+        self.translation_direction = self.batch_settings["translate_direction"]
+
+        # Auto-route between media processing and document translation
+        first_file = Path(files[0])
+        if first_file.suffix.lower() in {".txt", ".docx", ".pdf", ".html", ".htm", ".md"}:
+            self.batch_document_queue = list(files)
+            self._batch_next_document()
+        else:
+            self._batch_next_media()
+
+    def _batch_next_media(self):
+        import time
+        if getattr(self, "batch_file_start_time", None):
+            self.batch_completed_durations.append(time.monotonic() - self.batch_file_start_time)
+            self.batch_file_start_time = None
+
+        if not hasattr(self, "batch_queue") or not self.batch_queue:
+            self.batch_active = False  # Reset active flag when queue is empty
+            self.batch_total_files = 0
+            self.batch_current_file_idx = 0
+            self.progress.hide()
+            self.cancel_button.hide()
+            self.set_processing_stage(None)
+            self.log_activity("[BATCH] All media batch processing completed.")
+            QMessageBox.information(self, "Batch Processing", "Batch processing completed successfully!")
+            return
+
+        # Fetch next media file
+        current_file = self.batch_queue.pop(0)
+        self.batch_current_file_idx += 1
+        self.batch_file_start_time = time.monotonic()
+        self.log_activity(f"[BATCH] Processing media file ({self.batch_current_file_idx} of {self.batch_total_files}): {current_file}")
+
+        try:
+            output_dir = Path(self.batch_settings.get("output", ""))
+            base_name = safe_filename(Path(current_file).stem)
+            skip_existing = self.batch_settings.get("skip_existing", False)
+
+            # Build expected output extension list based on requested formats
+            required_exts = []
+            if self.batch_settings.get("full_txt") or self.batch_settings.get("story_txt"):
+                required_exts.append(".txt")
+            if self.batch_settings.get("full_docx") or self.batch_settings.get("story_docx"):
+                required_exts.append(".docx")
+            if self.batch_settings.get("full_srt") or self.batch_settings.get("story_srt"):
+                required_exts.append(".srt")
+            if self.batch_settings.get("full_vtt") or self.batch_settings.get("story_vtt"):
+                required_exts.append(".vtt")
+
+            # Check if all target output files already exist on disk
+            all_exist = False
+            if skip_existing and required_exts:
+                if self.batch_settings.get("unified_transcripts", False):
+                    custom_trans_dir = self.batch_settings.get("transcripts_output", "").strip()
+                    trans_dir = Path(custom_trans_dir) if custom_trans_dir else (output_dir / "Transcripts")
+                    all_exist = trans_dir.exists() and all((trans_dir / f"{base_name}{ext}").exists() for ext in required_exts)
+                else:
+                    sub_trans_dir = output_dir / base_name / "Transcripts"
+                    legacy_dir = output_dir / base_name
+                    all_exist = (
+                        (output_dir.exists() and all((output_dir / f"{base_name}{ext}").exists() for ext in required_exts)) or
+                        (sub_trans_dir.exists() and all((sub_trans_dir / f"{base_name}{ext}").exists() for ext in required_exts)) or
+                        (legacy_dir.exists() and all((legacy_dir / f"{base_name}{ext}").exists() for ext in required_exts))
+                    )
+
+            # Silence auto-save prompts before switching contexts
+            if self.project_dirty and self.audio_file:
+                self.save_project(force=True)
+
+            # Load the media file
+            if not self.load_media_file(current_file):
+                self._batch_media_error(f"Could not load file {current_file}")
+                return
+
+            # If skipping re-processing, trigger immediate export from existing data
+            if all_exist:
+                self.log_activity(f"[BATCH] Requested outputs exist for {base_name}. Skipping AI pipeline and generating exports directly.")
+                self._batch_export_current()
+                QTimer.singleShot(0, self._batch_next_media)
+                return
+
+            # Non-interactive automated pipeline setup for batch execution
+            pipeline_stages = []
+            pipeline_mode = self.batch_settings.get("pipeline_mode", "full")
+
+            if pipeline_mode == "full":
+                if not self.transcript or not self.processing_status.get("transcription"):
+                    pipeline_stages.append("transcription")
+
+                if self.batch_settings.get("include_speakers") and (not self.diarization or not self.processing_status.get("diarization")):
+                    pipeline_stages.append("diarization")
+
+                if self.batch_settings.get("scope") in ("stories", "both") and not self.stories:
+                    pipeline_stages.append("stories")
+
+                if self.batch_settings.get("translate_es"):
+                    pipeline_stages.append("translation")
+            else:
+                if self.batch_settings.get("do_transcribe", True) and (not self.transcript or not self.processing_status.get("transcription")):
+                    pipeline_stages.append("transcription")
+
+                if self.batch_settings.get("do_diarize", True) and (not self.diarization or not self.processing_status.get("diarization")):
+                    pipeline_stages.append("diarization")
+
+                if self.batch_settings.get("do_stories", True) and not self.stories:
+                    pipeline_stages.append("stories")
+
+                if self.batch_settings.get("translate_es"):
+                    pipeline_stages.append("translation")
+
+            if pipeline_stages:
+                self.pipeline_queue = pipeline_stages
+                self.pipeline_active = True
+                QTimer.singleShot(0, self._run_next_selected_processing)
+            else:
+                self._batch_export_current()
+                QTimer.singleShot(0, self._batch_next_media)
+
+        except Exception as e:
+            self._batch_media_error(f"Failed to process {current_file}: {str(e)}")
+
+    def _batch_next_document(self):
+        import time
+        if getattr(self, "batch_file_start_time", None):
+            self.batch_completed_durations.append(time.monotonic() - self.batch_file_start_time)
+            self.batch_file_start_time = None
+
+        if not hasattr(self, "batch_document_queue") or not self.batch_document_queue:
+            self.batch_active = False
+            self.batch_total_files = 0
+            self.batch_current_file_idx = 0
+            self.progress.hide()
+            self.cancel_button.hide()
+            self.set_processing_stage(None)
+            self.log_activity("[BATCH] All document batch processing completed.")
+            QMessageBox.information(self, "Batch Processing", "Batch document translation completed successfully!")
+            return
+
+        current_doc = self.batch_document_queue.pop(0)
+        self.batch_current_file_idx += 1
+        self.batch_file_start_time = time.monotonic()
+        self.log_activity(f"[BATCH] Translating document ({self.batch_current_file_idx} of {self.batch_total_files}): {current_doc}")
+        try:
+            if hasattr(self, "translate_document_file"):
+                self.translate_document_file(current_doc)
+            else:
+                self.log_activity(f"[BATCH] Processed {current_doc}")
+                QTimer.singleShot(50, self._batch_next_document)
+        except Exception as exc:
+            self._batch_document_error(f"Error translating {current_doc}: {exc}")
+
+    def _batch_document_error(self, msg):
+        """Handles document batch translation errors safely."""
+        self.log_activity(f"[BATCH] Document translation failed: {msg}")
+        self.progress.hide()
+        self.cancel_button.hide()
+        self.batch_document_state = None
+
+        # Reset active status so dialog reopening is not blocked
+        self.batch_active = False 
+        QTimer.singleShot(0, self._batch_next_document)
+
+    def _load_user_preferences(self):
+        self.language = str(self.settings_store.value("language", "en") or "en")
+        self.show_speaker_labels = str(self.settings_store.value("show_speaker_labels", "true")).lower() in {"1", "true", "yes"}
+        self.show_timestamps = str(self.settings_store.value("show_timestamps", "true")).lower() in {"1", "true", "yes"}
+        self.show_milliseconds = str(self.settings_store.value("show_milliseconds", "false")).lower() in {"1", "true", "yes"}
+        self.default_project_directory = str(self.settings_store.value("default_project_directory", "") or "")
+        self.startup_project_mode = str(self.settings_store.value("startup_project_mode", "last") or "last")
+        if self.startup_project_mode not in {"new", "last", "prompt"}:
+            self.startup_project_mode = "last"
+        self.timeline_show_waveform = str(self.settings_store.value("timeline_show_waveform", "true")).lower() in {"1", "true", "yes"}
+        self.timeline_show_thumbnails = str(self.settings_store.value("timeline_show_thumbnails", "true")).lower() in {"1", "true", "yes"}
+
+        self.timeline_thumbnail_position = str(self.settings_store.value("timeline_thumbnail_position", "below")).lower()
+        if self.timeline_thumbnail_position not in ("above", "below"):
+            self.timeline_thumbnail_position = "below"
+
+        self.transcript_selection_mode = str(self.settings_store.value("transcript_selection_mode", "replace") or "replace")
+        if self.transcript_selection_mode not in ("replace", "keep"):
+            self.transcript_selection_mode = "replace"
+        if hasattr(self, "transcript_view") and hasattr(self.transcript_view, "set_selection_mode"):
+            self.transcript_view.set_selection_mode(self.transcript_selection_mode)
+
+        if hasattr(self, "timeline"):
+            self.timeline.set_timeline_views(self.timeline_show_waveform, self.timeline_show_thumbnails)
+            self.timeline.set_thumbnail_position(self.timeline_thumbnail_position)
+        saved_theme = str(self.settings_store.value("theme_mode", "dark") or "dark")
+        if saved_theme not in ("dark", "light", "high_contrast"):
+            saved_theme = "dark"
+        self.set_theme(saved_theme)
+
+        # Models & AI settings
+        self.whisper_model = str(self.settings_store.value("whisper_model", "parakeet-onnx") or "parakeet-onnx")
+        try:
+            self.whisper_beam_size = int(self.settings_store.value("whisper_beam_size", 5) or 5)
+        except Exception:
+            self.whisper_beam_size = 5
+        self.translation_model_variant = str(self.settings_store.value("translation_model_variant", "tiny") or "tiny")
+        if hasattr(self, "refresh_whisper_model_chooser"):
+            self.refresh_whisper_model_chooser()
+        if hasattr(self, "refresh_translation_model_chooser"):
+            self.refresh_translation_model_chooser()
+
+        # Playback & Timing
+        try:
+            self.skip_seconds = int(self.settings_store.value("skip_seconds", 5) or 5)
+        except Exception:
+            self.skip_seconds = 5
+        if hasattr(self, "timeline") and hasattr(self.timeline, "set_skip_seconds"):
+            self.timeline.set_skip_seconds(self.skip_seconds)
+
+        # Detection Thresholds
+        try:
+            self.silence_threshold = float(self.settings_store.value("silence_threshold", 3.0) or 3.0)
+            self.lead_in_padding = float(self.settings_store.value("lead_in_padding", 0.5) or 0.5)
+            self.expected_speakers = str(self.settings_store.value("default_expected_speakers", "auto") or "auto")
+            self.story_detection_mode = str(self.settings_store.value("story_detection_mode", "voice") or "voice")
+        except Exception:
+            pass
+
+        # Auto-save
+        try:
+            self.auto_save_minutes = int(self.settings_store.value("auto_save_minutes", 5) or 5)
+        except Exception:
+            self.auto_save_minutes = 5
+        if hasattr(self, "update_auto_save_timer"):
+            self.update_auto_save_timer()
+
+        # Audio Hardware
+        if hasattr(self, "apply_audio_output_device"):
+            self.apply_audio_output_device()
+
+        # Load custom vocabulary / glossary on startup.  The terminology
+        # layer accepts the older plain-string format as well as the newer
+        # structured entries used by the glossary editor.
+        try:
+            from terminology import parse_glossary
+            raw_glossary = self.settings_store.value("glossary", "")
+            self.glossary = parse_glossary(raw_glossary)
+        except Exception:
+            self.glossary = []
+
+        self.apply_glossary_to_whisper_context()
+        if self.language == "es":
+            self.set_language("es", persist=False)
+
+    def set_thumbnail_position(self, position):
+        self.timeline_thumbnail_position = position
+        self.settings_store.setValue("timeline_thumbnail_position", position)
+        if hasattr(self, "timeline"):
+            self.timeline.set_thumbnail_position(position)
+
+    def _remember_saved_project(self, path):
+        """Remember only projects that have actually been saved.
+
+        Opening a project or media file must not change the startup target.
+        """
+        if not path:
+            return
+        try:
+            p = Path(path).resolve()
+            if p.suffix.lower() in {".rtvs", ".json"}:
+                resolved = str(p)
+                self.settings_store.setValue("last_saved_project_path", resolved)
+                raw = self.settings_store.value("recent_projects", [])
+                if isinstance(raw, str):
+                    try:
+                        raw = json.loads(raw)
+                    except Exception:
+                        raw = [raw] if raw else []
+                recent = [resolved]
+                for item in raw if isinstance(raw, list) else []:
+                    item = str(item)
+                    if item and item != resolved:
+                        recent.append(item)
+                self.settings_store.setValue("recent_projects", json.dumps(recent[:10]))
+                # Flush now rather than relying on QSettings' own timing --
+                # this is the exact write "restore last project" depends on,
+                # so it needs to reliably survive an app close shortly after.
+                self.settings_store.sync()
+                if hasattr(self, "_refresh_recent_projects_menu"):
+                    self._refresh_recent_projects_menu()
+        except Exception:
+            pass
+
+    def _dialog_directory(self, fallback=None):
+        # Open Media / Open Document / Open Project share the most recently
+        # used folder, while retaining the configured project directory as a
+        # first-run fallback.
+        try:
+            remembered = str(self.settings_store.value("last_open_directory", "") or "")
+            if remembered and Path(remembered).is_dir():
+                return remembered
+        except Exception:
+            pass
+        if self.default_project_directory:
+            return self.default_project_directory
+        return str(Path(fallback).parent) if fallback else ""
+
+    def _remember_open_directory(self, path):
+        try:
+            directory = Path(path).resolve().parent if Path(path).suffix else Path(path).resolve()
+            if directory.is_dir():
+                self.settings_store.setValue("last_open_directory", str(directory))
+                self.settings_store.sync()
+        except Exception:
+            pass
+
+    def _sync_startup_project_actions(self):
+        """Synchronize the Project Settings startup radio/check actions."""
+        mode = getattr(self, "startup_project_mode", "last")
+        if hasattr(self, "startup_new_action"):
+            self.startup_new_action.setChecked(mode == "new")
+            self.startup_last_action.setChecked(mode == "last")
+            self.startup_prompt_action.setChecked(mode == "prompt")
+
+    def set_startup_project_mode(self, mode):
+        """Set the startup project policy."""
+        if mode not in {"new", "last", "prompt"}:
+            return
+        self.startup_project_mode = mode
+        self.settings_store.setValue("startup_project_mode", mode)
+        self._sync_startup_project_actions()
+
+    def restore_last_opened(self):
+        """Apply startup policy and offer recovery from a newer autosave snapshot."""
+        # If launched with a file argument (e.g. associated .rtvs project or media file), open it directly
+        for arg in sys.argv[1:]:
+            if not arg.startswith("-"):
+                try:
+                    arg_path = Path(arg).resolve()
+                    if arg_path.is_file():
+                        if arg_path.suffix.lower() in (".rtvs", ".json"):
+                            self.load_project_file(arg_path, prompt=False, preserve_media=False)
+                            self.log_activity(f"[STARTUP] Opened project from command line: {arg_path.name}", mark_dirty=False)
+                            return
+                        elif arg_path.suffix.lower() in (".txt", ".docx", ".pdf", ".html", ".htm", ".md"):
+                            self.open_document_path(arg_path)
+                            return
+                        else:
+                            self.load_media_file(arg_path)
+                            return
+                except Exception as exc:
+                    self.log_activity(f"[STARTUP] Could not open argument '{arg}': {exc}", mark_dirty=False)
+
+        mode = getattr(self, "startup_project_mode", "last")
+        raw_saved = str(self.settings_store.value("last_saved_project_path", "") or "")
+        if raw_saved:
+            saved_path = Path(raw_saved)
+            crash_recovery = saved_path.with_suffix(".crash_recovery.rtvs")
+            autosave = saved_path.with_suffix(saved_path.suffix + ".autosave")
+            try:
+                # Check for emergency crash recovery snapshot first
+                if crash_recovery.exists() and crash_recovery.is_file():
+                    answer = QMessageBox.question(
+                        self,
+                        "Crash Recovery Found",
+                        f"An emergency crash recovery snapshot was found for {saved_path.name}.\n\n"
+                        "This snapshot was created immediately prior to an unexpected application termination.\n"
+                        "Would you like to recover this unsaved session?",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.Yes,
+                    )
+                    if answer == QMessageBox.StandardButton.Yes:
+                        if self.load_project_file(crash_recovery, prompt=False, preserve_media=False):
+                            self.project_file = saved_path
+                            self.project_dirty = True
+                            self.log_activity(f"[CRASH-RECOVERY] Recovered emergency crash snapshot for {saved_path.name}.", mark_dirty=False)
+                            try:
+                                crash_recovery.unlink(missing_ok=True)
+                            except Exception:
+                                pass
+                            return
+                    else:
+                        try:
+                            crash_recovery.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+
+                if autosave.exists() and saved_path.exists() and autosave.stat().st_mtime > saved_path.stat().st_mtime:
+                    answer = QMessageBox.question(self, "Recover Auto-Saved Project", f"A newer recovery snapshot was found for {saved_path.name}. Would you like to recover it?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                    if answer == QMessageBox.StandardButton.Yes:
+                        if self.load_project_file(autosave, prompt=False, preserve_media=False):
+                            self.project_file = saved_path
+                            self.project_dirty = True
+                            # The autosave is a recovery artifact, not a recent project.
+                            raw_recent = self.settings_store.value("recent_projects", [])
+                            try:
+                                recent = json.loads(raw_recent) if isinstance(raw_recent, str) else list(raw_recent or [])
+                            except Exception:
+                                recent = []
+                            self.settings_store.setValue("recent_projects", json.dumps([str(x) for x in recent if str(x) != str(autosave.resolve())][:10]))
+                            if hasattr(self, "_refresh_recent_projects_menu"):
+                                self._refresh_recent_projects_menu()
+                            self.log_activity(f"[AUTOSAVE] Recovered newer snapshot for {saved_path.name}.", mark_dirty=False)
+                            return
+            except Exception as exc:
+                self.log_activity(f"[RECOVERY] Recovery check failed: {exc}", mark_dirty=False)
+
+        if mode == "new":
+            self.log_activity("[STARTUP] Starting with a new, unsaved project by preference.", mark_dirty=False)
+            return
+
+        raw = str(self.settings_store.value("last_saved_project_path", "") or "")
+        path = Path(raw) if raw else None
+        valid_last = bool(path and path.exists() and path.is_file() and path.suffix.lower() in (".rtvs", ".json"))
+
+        # If last_saved_project_path is missing or stale, fall back to the most recent entry from recent_projects
+        if not valid_last:
+            raw_recent = self.settings_store.value("recent_projects", [])
+            if isinstance(raw_recent, str):
+                try:
+                    raw_recent = json.loads(raw_recent)
+                except Exception:
+                    raw_recent = []
+            if isinstance(raw_recent, list):
+                for candidate in raw_recent:
+                    cand_path = Path(str(candidate))
+                    if cand_path.exists() and cand_path.is_file() and cand_path.suffix.lower() in (".rtvs", ".json"):
+                        path = cand_path
+                        valid_last = True
+                        self.settings_store.setValue("last_saved_project_path", str(path))
+                        self.settings_store.sync()
+                        break
+
+        if mode == "prompt":
+            if not valid_last:
+                self.log_activity("[STARTUP] No previous project is available; starting with a new, unsaved project.", mark_dirty=False)
+                return
+
+            box = QMessageBox(self)
+            box.setWindowTitle("Project Startup")
+            box.setText("What would you like to open?")
+            box.setInformativeText(
+                "Choose whether to start with a new, unsaved project or reopen "
+                "the last project you saved."
+            )
+            open_last_btn = box.addButton("Open Last Saved Project", QMessageBox.ButtonRole.AcceptRole)
+            box.addButton("New Unsaved Project", QMessageBox.ButtonRole.DestructiveRole)
+            box.exec()
+            if box.clickedButton() is not open_last_btn:
+                self.log_activity("[STARTUP] Starting with a new, unsaved project by user choice.", mark_dirty=False)
+                return
+
+        if not valid_last:
+            self.log_activity("[STARTUP] Last project is unavailable; starting with a new, unsaved project.", mark_dirty=False)
+            return
+
+        try:
+            data = read_rtvs_project_file(path)
+            media = self.resolve_project_media(path, data.get("audio_file"))
+            if not data.get("audio_file") or media is not None:
+                self.load_project_file(path, prompt=False, preserve_media=False)
+                self.log_activity(f"[STARTUP] Restored last project: {path.name}", mark_dirty=False)
+            else:
+                self.log_activity(
+                    "[STARTUP] Last project is available but its media file is missing; starting blank.",
+                    mark_dirty=False,
+                )
+        except Exception as exc:
+            self.log_activity(f"[STARTUP] Could not restore last project: {exc}", mark_dirty=False)
+
+    def toggle_speaker_labels(self, checked):
+        self.show_speaker_labels = bool(checked)
+        self.settings_store.setValue("show_speaker_labels", self.show_speaker_labels)
+        self.render_transcript()
+
+    def toggle_timestamps(self, checked):
+        self.show_timestamps = bool(checked)
+        self.settings_store.setValue("show_timestamps", self.show_timestamps)
+        if hasattr(self, "show_timestamps_action"):
+            self.show_timestamps_action.blockSignals(True)
+            self.show_timestamps_action.setChecked(self.show_timestamps)
+            self.show_timestamps_action.blockSignals(False)
+        self.render_transcript()
+
+    def toggle_milliseconds(self, checked):
+        self.show_milliseconds = bool(checked)
+        self.settings_store.setValue("show_milliseconds", self.show_milliseconds)
+        if hasattr(self, "show_milliseconds_action"):
+            self.show_milliseconds_action.blockSignals(True)
+            self.show_milliseconds_action.setChecked(self.show_milliseconds)
+            self.show_milliseconds_action.blockSignals(False)
+        self.render_transcript()
+
+    def toggle_waveform_view(self, checked):
+        self.timeline_show_waveform = bool(checked)
+        self.settings_store.setValue("timeline_show_waveform", self.timeline_show_waveform)
+        if hasattr(self, "timeline"):
+            self.timeline.set_timeline_views(self.timeline_show_waveform, self.timeline_show_thumbnails)
+
+    def toggle_thumbnail_view(self, checked):
+        self.timeline_show_thumbnails = bool(checked)
+        self.settings_store.setValue("timeline_show_thumbnails", self.timeline_show_thumbnails)
+        if hasattr(self, "timeline"):
+            self.timeline.set_timeline_views(self.timeline_show_waveform, self.timeline_show_thumbnails)
+
+    def choose_default_project_directory(self):
+        start = self.default_project_directory or str(Path.home())
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "Choose Default Project Directory",
+            start
+        )
+        if directory:
+            self.default_project_directory = str(Path(directory).resolve())
+            self.settings_store.setValue(
+                "default_project_directory",
+                self.default_project_directory
+            )
+            self.statusBar().showMessage(
+                f"Default project directory: {self.default_project_directory}"
+            )
+
+    def open_document_path(self, path):
+        path = Path(path).resolve()
+        if not path.exists(): return False
+        if not self.batch_active and (self.audio_file or self.transcript or self.project_file):
+            if not self.prepare_for_new_media(): return False
+        try:
+            text = read_document_text(path)
+        except Exception as exc:
+            if not self.batch_active:
+                QMessageBox.critical(self, "Open Document Error", f"Could not read document:\n\n{exc}")
+            return False
+        lines = text.splitlines()
+        segments=[]; cursor=0.0
+        for line in lines:
+            value=line.strip()
+            if value:
+                segments.append({"text":value,"start":cursor,"end":cursor})
+                cursor += 0.001
+        # Clear active media player source and waveform peaks when switching to document-only mode
+        if hasattr(self, "player") and self.player:
+            self.player.stop()
+            self.player.setSource(QUrl())
+        if hasattr(self, "timeline"):
+            self.timeline.set_waveform_peaks([])
+            self.timeline.set_audio_filename(None)
+
+        self.audio_file=None; self.project_file=None; self.duration=0.0
+        self.transcript={"text":text,"segments":segments,"language":"en"}
+        self.diarization=None; self.stories=[]; self.translations={}; self.translation_display_mode="en"
+        self.project_dirty=True
+        self.update_translation_language_selector(); self.render_transcript(); self.update_processing_menu_status(); self.set_tools_actions_enabled(True)
+        self.statusBar().showMessage(f"Document loaded: {path.name}")
+        return True
+
+    def open_clear_cache_dialog(self):
+        project_dirs = []
+        if getattr(self, "project_file", None):
+            try:
+                project_dirs.append(Path(self.project_file).parent)
+            except Exception:
+                pass
+        if getattr(self, "audio_file", None):
+            try:
+                project_dirs.append(Path(self.audio_file).parent)
+            except Exception:
+                pass
+        dialog = ClearCacheDialog(self, language=getattr(self, "language", "en"), project_dirs=project_dirs)
+        dialog.exec()
+
+    def open_glossary_dialog(self):
+        """Edit persistent terminology used by every ASR and translation backend."""
+        is_es = (getattr(self, "language", "en") == "es")
+
+        title = "Vocabulario personalizado / glosario" if is_es else "Custom Vocabulary / Glossary"
+        desc = (
+            "Defina la forma preferida de cada término. Marque 'No traducir' para nombres propios, programas o marcas que deben conservarse exactamente en las traducciones."
+            if is_es else
+            "Define the preferred spelling for each term. Check 'Don't translate' for proper nouns, program names, brands, or other terms that must remain unchanged in translations."
+        )
+        source_text = "Término de origen" if is_es else "Source term"
+        preferred_text = "Ortografía preferida" if is_es else "Preferred spelling"
+        dnt_text = "No traducir" if is_es else "Don't translate"
+        add_text = "Añadir término" if is_es else "Add Term"
+        remove_text = "Eliminar seleccionado" if is_es else "Remove Selected"
+        save_text = "Guardar" if is_es else "Save"
+        cancel_text = "Cancelar" if is_es else "Cancel"
+        example_text = (
+            "Ejemplo: atrévete → Atrévete" if is_es else
+            "Example: atrevete → Atrévete"
+        )
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        dialog.resize(760, 500)
+        layout = QVBoxLayout(dialog)
+
+        help_label = QLabel(desc)
+        help_label.setWordWrap(True)
+        layout.addWidget(help_label)
+        example_label = QLabel(example_text)
+        example_label.setStyleSheet("color: palette(mid); font-style: italic;")
+        layout.addWidget(example_label)
+
+        table = QTableWidget(0, 3)
+        table.setHorizontalHeaderLabels([source_text, preferred_text, dnt_text])
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        table.setAlternatingRowColors(True)
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+
+        from terminology import parse_glossary
+        entries = parse_glossary(getattr(self, "glossary", []))
+        for entry in entries:
+            row = table.rowCount()
+            table.insertRow(row)
+            table.setItem(row, 0, QTableWidgetItem(str(entry["source"])))
+            table.setItem(row, 1, QTableWidgetItem(str(entry["preferred"])))
+            check = QTableWidgetItem()
+            check.setFlags(check.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            check.setCheckState(Qt.CheckState.Checked if entry.get("do_not_translate", True) else Qt.CheckState.Unchecked)
+            table.setItem(row, 2, check)
+        layout.addWidget(table, 1)
+
+        import_text = "Importar..." if is_es else "Import..."
+        export_text = "Exportar..." if is_es else "Export..."
+
+        row_buttons = QHBoxLayout()
+        add = QPushButton(add_text)
+        remove = QPushButton(remove_text)
+        import_btn = QPushButton(import_text)
+        export_btn = QPushButton(export_text)
+        row_buttons.addWidget(add)
+        row_buttons.addWidget(remove)
+        row_buttons.addSpacing(12)
+        row_buttons.addWidget(import_btn)
+        row_buttons.addWidget(export_btn)
+        row_buttons.addStretch()
+        layout.addLayout(row_buttons)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        cancel = QPushButton(cancel_text)
+        save = QPushButton(save_text)
+        buttons.addWidget(cancel)
+        buttons.addWidget(save)
+        layout.addLayout(buttons)
+
+        def add_row(source_val="", preferred_val="", dnt_val=True):
+            row = table.rowCount()
+            table.insertRow(row)
+            table.setItem(row, 0, QTableWidgetItem(source_val))
+            table.setItem(row, 1, QTableWidgetItem(preferred_val))
+            check = QTableWidgetItem()
+            check.setFlags(check.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            check.setCheckState(Qt.CheckState.Checked if dnt_val else Qt.CheckState.Unchecked)
+            table.setItem(row, 2, check)
+            table.setCurrentCell(row, 0)
+            if not source_val and not preferred_val:
+                table.editItem(table.item(row, 0))
+
+        def remove_rows():
+            rows = sorted({index.row() for index in table.selectionModel().selectedRows()}, reverse=True)
+            for row in rows:
+                table.removeRow(row)
+
+        def get_current_table_entries():
+            entries_out = []
+            seen = set()
+            for row in range(table.rowCount()):
+                source_item = table.item(row, 0)
+                preferred_item = table.item(row, 1)
+                source = (source_item.text() if source_item else "").strip()
+                preferred = (preferred_item.text() if preferred_item else "").strip()
+                if not source and not preferred:
+                    continue
+                if not source:
+                    source = preferred
+                if not preferred:
+                    preferred = source
+                key = (source.casefold(), preferred.casefold())
+                if key in seen:
+                    continue
+                seen.add(key)
+                check = table.item(row, 2)
+                protected = bool(check and check.checkState() == Qt.CheckState.Checked)
+                entries_out.append({
+                    "source": source,
+                    "preferred": preferred,
+                    "do_not_translate": protected,
+                })
+            return entries_out
+
+        def export_glossary_file():
+            from terminology import export_glossary_to_json, export_glossary_to_csv
+            entries = get_current_table_entries()
+            if not entries:
+                QMessageBox.information(
+                    dialog,
+                    "Export Glossary" if not is_es else "Exportar glosario",
+                    "There are no glossary entries to export." if not is_es else "No hay términos en el glosario para exportar."
+                )
+                return
+            file_path, selected_filter = QFileDialog.getSaveFileName(
+                dialog,
+                "Export Custom Vocabulary / Glossary" if not is_es else "Exportar vocabulario personalizado / glosario",
+                "glossary.json",
+                "JSON Files (*.json);;CSV Files (*.csv);;All Files (*)"
+            )
+            if not file_path:
+                return
+            try:
+                if file_path.lower().endswith(".csv"):
+                    content = export_glossary_to_csv(entries)
+                else:
+                    content = export_glossary_to_json(entries)
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write(content)
+                QMessageBox.information(
+                    dialog,
+                    "Export Complete" if not is_es else "Exportación completada",
+                    f"Successfully exported {len(entries)} glossary entries to:\n{file_path}"
+                    if not is_es else
+                    f"Se exportaron con éxito {len(entries)} términos a:\n{file_path}"
+                )
+            except Exception as e:
+                QMessageBox.critical(
+                    dialog,
+                    "Export Error" if not is_es else "Error de exportación",
+                    f"Failed to export glossary:\n{e}"
+                )
+
+        def import_glossary_file():
+            from terminology import import_glossary_from_text
+            file_path, _ = QFileDialog.getOpenFileName(
+                dialog,
+                "Import Custom Vocabulary / Glossary" if not is_es else "Importar vocabulario personalizado / glosario",
+                "",
+                "Glossary Files (*.json *.csv *.tsv *.txt);;All Files (*)"
+            )
+            if not file_path:
+                return
+            try:
+                with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+                imported = import_glossary_from_text(content)
+                if not imported:
+                    QMessageBox.warning(
+                        dialog,
+                        "Import Glossary" if not is_es else "Importar glosario",
+                        "No valid glossary entries found in the selected file." if not is_es else "No se encontraron términos válidos en el archivo seleccionado."
+                    )
+                    return
+                # Merge into table
+                existing_keys = set()
+                for r in range(table.rowCount()):
+                    s_item = table.item(r, 0)
+                    p_item = table.item(r, 1)
+                    s_txt = (s_item.text() if s_item else "").strip().casefold()
+                    p_txt = (p_item.text() if p_item else "").strip().casefold()
+                    existing_keys.add((s_txt, p_txt))
+
+                added_count = 0
+                for entry in imported:
+                    s = str(entry.get("source", "")).strip()
+                    p = str(entry.get("preferred", "")).strip()
+                    dnt = bool(entry.get("do_not_translate", True))
+                    if not s and not p:
+                        continue
+                    if not s:
+                        s = p
+                    if not p:
+                        p = s
+                    key = (s.casefold(), p.casefold())
+                    if key not in existing_keys:
+                        existing_keys.add(key)
+                        add_row(s, p, dnt)
+                        added_count += 1
+                QMessageBox.information(
+                    dialog,
+                    "Import Complete" if not is_es else "Importación completada",
+                    f"Imported {added_count} new entries from:\n{file_path}"
+                    if not is_es else
+                    f"Se importaron {added_count} nuevos términos de:\n{file_path}"
+                )
+            except Exception as e:
+                QMessageBox.critical(
+                    dialog,
+                    "Import Error" if not is_es else "Error de importación",
+                    f"Failed to import glossary:\n{e}"
+                )
+
+        def save_glossary():
+            entries_out = get_current_table_entries()
+            self.glossary = entries_out
+            self._save_glossary()
+            self.apply_glossary_to_whisper_context()
+            self.statusBar().showMessage("Glossary saved" if not is_es else "Glosario guardado")
+            dialog.accept()
+
+        add.clicked.connect(lambda: add_row("", "", True))
+        remove.clicked.connect(remove_rows)
+        import_btn.clicked.connect(import_glossary_file)
+        export_btn.clicked.connect(export_glossary_file)
+        save.clicked.connect(save_glossary)
+        cancel.clicked.connect(dialog.reject)
+        dialog.exec()
+
+    def _save_glossary(self):
+        self.settings_store.setValue("glossary", json.dumps(self.glossary, ensure_ascii=False))
+
+    def add_to_glossary(self, text):
+        text = str(text or "").strip().strip(".,!?;:()[]{}\"'“”‘’")
+        if not text:
+            return
+        from terminology import parse_glossary
+        entries = parse_glossary(self.glossary)
+        if text.casefold() not in {str(x["source"]).casefold() for x in entries}:
+            entries.append({"source": text, "preferred": text, "do_not_translate": True})
+            self.glossary = entries
+            self._save_glossary()
+            self.apply_glossary_to_whisper_context()
+            self.statusBar().showMessage(f"Added to glossary: {text}")
+
+    def apply_glossary_to_whisper_context(self):
+        # Whisper can use the glossary as contextual vocabulary, but this is
+        # only an optional hint. Final spelling is normalized after every ASR
+        # backend (Whisper, Parakeet, FastConformer, and future models).
+        try:
+            from terminology import parse_glossary
+            entries = parse_glossary(self.glossary)
+            self.whisper_initial_prompt = ", ".join(
+                str(e["preferred"]) for e in entries[:200]
+            )
+        except Exception:
+            self.whisper_initial_prompt = ""
+
+    def add_custom_speaker_to_glossary(self, name):
+        if name and name.strip():
+            self.add_to_glossary(name.strip())
+
+    def set_language(self, language, persist=True):
+        self.language = "es" if language == "es" else "en"
+        if persist:
+            self.settings_store.setValue("language", self.language)
+        if hasattr(self, "ui_lang_en_action"):
+            self.ui_lang_en_action.blockSignals(True)
+            self.ui_lang_en_action.setChecked(self.language != "es")
+            self.ui_lang_en_action.blockSignals(False)
+        elif hasattr(self, "lang_en_action"):
+            self.lang_en_action.blockSignals(True)
+            self.lang_en_action.setChecked(self.language != "es")
+            self.lang_en_action.blockSignals(False)
+
+        if hasattr(self, "ui_lang_es_action"):
+            self.ui_lang_es_action.blockSignals(True)
+            self.ui_lang_es_action.setChecked(self.language == "es")
+            self.ui_lang_es_action.blockSignals(False)
+        elif hasattr(self, "lang_es_action"):
+            self.lang_es_action.blockSignals(True)
+            self.lang_es_action.setChecked(self.language == "es")
+            self.lang_es_action.blockSignals(False)
+        self._apply_localization()
+
+    def _apply_localization(self):
+        mapping = {
+            "&File": "&Archivo", "&Edit": "&Editar", "&View": "&Ver", "&Tools": "&Herramientas", "&Settings": "&Configuración", "&Help": "&Ayuda",
+            "&New Project": "&Nuevo proyecto", "&Load Project...": "&Cargar proyecto...", "&Save Project": "&Guardar proyecto", "Save &As...": "Guardar &como...", "&Close Project": "&Cerrar proyecto",
+            "&Open Media...": "&Abrir medio...", "Open Document...": "Abrir documento...", "&Export...": "&Exportar...", "E&xit": "&Salir", "&Undo": "&Deshacer", "&Redo": "&Rehacer",
+            "&Preferences...": "&Preferencias...", "&Language / Idioma": "&Idioma / Language",
+            "Find and Replace...": "Buscar y reemplazar...", "Video Preview": "Vista previa de video", "Timeline": "Línea de tiempo", "Transcript": "Transcripción", "Stories": "Historias", "Activity Log": "Registro de actividad",
+            "&Transcribe": "&Transcribir", "&Detect Speakers": "&Detectar hablantes", "&Detect Stories": "&Detectar historias", "&Translate Transcript...": "&Traducir transcripción...", "Manage Models...": "Administrar modelos...",
+            "Run Processing…": "Ejecutar procesamiento…", "Custom Vocabulary / Glossary...": "Vocabulario personalizado / glosario...", "Batch Processing...": "Procesamiento por lotes...",
+            "Speaker Labels": "Etiquetas de hablantes", "Timestamps": "Marcas de tiempo", "Language": "Idioma", "English": "Inglés", "Spanish": "Español",
+            "Search:": "Buscar:", "View:": "Vista:", "Translate…": "Traducir…", "Edit Transcript": "Editar transcripción", "Export Transcript": "Exportar transcripción",
+            "Start:": "Inicio:", "End:": "Fin:", "Title:": "Título:", "Range:": "Rango:",
+            "Set Story Start": "Fijar inicio de historia", "Set Story End": "Fijar fin de historia",
+            "Add Story": "Agregar historia", "Split Story": "Dividir historia", "Merge Stories": "Combinar historias", "Delete Story": "Eliminar historia",
+            "Update Selected Story": "Actualizar historia seleccionada", "Delete Selected Story": "Eliminar historia seleccionada",
+            "&Regenerate Waveform": "&Regenerar forma de onda", "Regenerate Video &Thumbnails": "Regenerar minia&turas de video",
+            "&Clear Temporary Cache...": "&Limpiar caché temporal...", "Clear &Temporary Cache...": "Limpiar caché &temporal...",
+            "Cancel Process": "Cancelar proceso", "Export Activity Log": "Exportar registro de actividad", "Clear Log": "Borrar registro", "Speaker Sensitivity": "Sensibilidad de hablantes",
+            "▶ Play": "▶ Reproducir", "❚❚ Pause": "❚❚ Pausa", "■ Stop": "■ Detener",
+        }
+        reverse = {v: k for k, v in mapping.items()}
+        active = mapping if self.language == "es" else reverse
+        for action in self.findChildren(QAction):
+            txt = action.text()
+            if txt in active:
+                action.setText(active[txt])
+        for w in self.findChildren(QLabel):
+            if w.text() in active:
+                w.setText(active[w.text()])
+        for w in self.findChildren(QPushButton):
+            if w.text() in active:
+                w.setText(active[w.text()])
+        for w in self.findChildren(QGroupBox):
+            if w.title() in active:
+                w.setTitle(active[w.title()])
+        if hasattr(self, "transcript_search_input"):
+            self.transcript_search_input.setPlaceholderText("Buscar en la transcripción..." if self.language == "es" else "Find in transcript...")
+        self.update_story_segment_terminology()
+
+    def update_story_segment_terminology(self):
+        """Update all user-facing labels and tooltips to use 'Song' in Music mode and 'Story' in Voice mode."""
+        is_music = (getattr(self, "story_detection_mode", "voice") == "music")
+        is_es = (getattr(self, "language", "en") == "es")
+
+        # Header: "Stories" vs "Songs" (or "Historias" vs "Canciones")
+        if hasattr(self, "stories_header") and self.stories_header is not None:
+            if is_music:
+                self.stories_header.setText("Canciones" if is_es else "Songs")
+            else:
+                self.stories_header.setText("Historias" if is_es else "Stories")
+
+        # Add Story / Song Button
+        if hasattr(self, "add_story_btn") and self.add_story_btn is not None:
+            if is_music:
+                self.add_story_btn.setText("Agregar canción" if is_es else "Add Song")
+                self.add_story_btn.setToolTip(
+                    "Agregar canción desde la selección activa de la línea de tiempo o transcripción" if is_es
+                    else "Add song from active timeline selection or highlighted transcript text"
+                )
+            else:
+                self.add_story_btn.setText("Agregar historia" if is_es else "Add Story")
+                self.add_story_btn.setToolTip(
+                    "Agregar historia desde la selección activa de la línea de tiempo o transcripción" if is_es
+                    else "Add story from active timeline selection or highlighted transcript text"
+                )
+
+        # Set Story / Song Start Button
+        if hasattr(self, "set_story_start_btn") and self.set_story_start_btn is not None:
+            if is_music:
+                self.set_story_start_btn.setText("Fijar inicio de canción" if is_es else "Set Song Start")
+                self.set_story_start_btn.setToolTip(
+                    "Fijar inicio de la canción seleccionada a la posición actual de transcripción o línea de tiempo" if is_es
+                    else "Set start time of selected song to current transcript or timeline position"
+                )
+            else:
+                self.set_story_start_btn.setText("Fijar inicio de historia" if is_es else "Set Story Start")
+                self.set_story_start_btn.setToolTip(
+                    "Fijar inicio de la historia seleccionada a la posición actual de transcripción o línea de tiempo" if is_es
+                    else "Set start time of selected story to current transcript or timeline position"
+                )
+
+        # Set Story / Song End Button
+        if hasattr(self, "set_story_end_btn") and self.set_story_end_btn is not None:
+            if is_music:
+                self.set_story_end_btn.setText("Fijar fin de canción" if is_es else "Set Song End")
+                self.set_story_end_btn.setToolTip(
+                    "Fijar fin de la canción seleccionada a la posición actual de transcripción o línea de tiempo" if is_es
+                    else "Set end time of selected song to current transcript or timeline position"
+                )
+            else:
+                self.set_story_end_btn.setText("Fijar fin de historia" if is_es else "Set Story End")
+                self.set_story_end_btn.setToolTip(
+                    "Fijar fin de la historia seleccionada a la posición actual de transcripción o línea de tiempo" if is_es
+                    else "Set end time of selected story to current transcript or timeline position"
+                )
+
+        # Title / Headline input placeholder
+        if hasattr(self, "title_input") and self.title_input is not None:
+            if is_music:
+                self.title_input.setPlaceholderText("Título de la canción / pista" if is_es else "Song title / track name")
+            else:
+                self.title_input.setPlaceholderText("Título / titular de la historia" if is_es else "Story headline / title")
+
+        # Select All Tooltip
+        if hasattr(self, "select_all_stories_btn") and self.select_all_stories_btn is not None:
+            if is_music:
+                self.select_all_stories_btn.setToolTip("Seleccionar todas las canciones de la lista" if is_es else "Select all songs in the list")
+            else:
+                self.select_all_stories_btn.setToolTip("Seleccionar todas las historias de la lista" if is_es else "Select all stories in the list")
+
+        # Delete Tooltip
+        if hasattr(self, "delete_story_btn") and self.delete_story_btn is not None:
+            if is_music:
+                self.delete_story_btn.setToolTip("Eliminar canción(es) seleccionada(s)" if is_es else "Delete selected song(s)")
+            else:
+                self.delete_story_btn.setToolTip("Eliminar historia(s) seleccionada(s)" if is_es else "Delete selected story/stories")
+
+        # Export Tooltip
+        if hasattr(self, "export_stories_btn") and self.export_stories_btn is not None:
+            if is_music:
+                self.export_stories_btn.setToolTip("Exportar episodio o canciones seleccionadas" if is_es else "Export full episode, selected songs, or draft to WordPress")
+            else:
+                self.export_stories_btn.setToolTip("Exportar episodio o historias seleccionadas" if is_es else "Export full episode, selected stories, or draft to WordPress")
+
+        # Tools Menu: Detect Stories / Detect Songs
+        if hasattr(self, "auto_detect_action") and self.auto_detect_action is not None:
+            has_stories = hasattr(self, "processing_status") and bool(self.processing_status.get("stories"))
+            if is_music:
+                if is_es:
+                    self.auto_detect_action.setText("&Detectar canciones (Completado)" if has_stories else "&Detectar canciones...")
+                else:
+                    self.auto_detect_action.setText("Detect Songs (Complete)" if has_stories else "&Detect Songs...")
+            else:
+                if is_es:
+                    self.auto_detect_action.setText("&Detectar historias (Completado)" if has_stories else "&Detectar historias...")
+                else:
+                    self.auto_detect_action.setText("Detect Stories (Complete)" if has_stories else "&Detect Stories...")
+
+        # View Menu: Stories Panel / Songs Panel
+        if hasattr(self, "toggle_stories_action") and self.toggle_stories_action is not None:
+            if is_music:
+                self.toggle_stories_action.setText("&Panel de canciones" if is_es else "&Songs Panel")
+            else:
+                self.toggle_stories_action.setText("&Panel de historias" if is_es else "&Stories Panel")
+
+    def open_document(self):
+        filters = (
+            "Supported Documents (*.txt *.docx *.pdf *.html *.htm *.md);;"
+            "Text Files (*.txt *.md);;"
+            "Word Documents (*.docx);;"
+            "PDF Files (*.pdf);;"
+            "HTML Files (*.html *.htm);;"
+            "All Files (*)"
+        )
+        filename, _ = QFileDialog.getOpenFileName(self, "Open Document", self._dialog_directory(), filters)
+        if not filename:
+            return
+
+        path = Path(filename).resolve()
+        self._remember_open_directory(path)
+
+        if self.audio_file or self.transcript or self.project_file:
+            if not self.prepare_for_new_media():
+                return
+
+        try:
+            text = read_document_text(path)
+        except Exception as exc:
+            self.log_activity(f"[ERROR] Failed to open document '{path.name}': {exc}")
+            QMessageBox.critical(self, "Open Document Error", f"Could not read document:\n\n{exc}")
+            return
+
+        lines = text.splitlines()
+        segments = []
+        cursor = 0.0
+
+        for line in lines:
+            value = line.strip()
+            if value:
+                segments.append({"text": value, "start": cursor, "end": cursor})
+                cursor += 0.001
+
+        self.audio_file = None
+        self.project_file = None
+        self.duration = 0.0
+        self.transcript = {"text": text, "segments": segments, "language": "en"}
+        self.diarization = None
+        self.stories = []
+        self.translations = {}
+        self.translation_display_mode = "en"
+        self.project_dirty = True
+
+        self.update_translation_language_selector()
+        self.render_transcript()
+        self.update_processing_menu_status()
+        self.set_tools_actions_enabled(True)
+        self.statusBar().showMessage(f"Document loaded: {path.name}")
+        self.log_activity(f"[FILE] Imported document: {path}")
+
+    def export_text_file(self):
+        if not self.transcript: QMessageBox.warning(self,"No Text","There is no transcript/text to export."); return
+        default=Path(self.project_file.stem if self.project_file else (self.audio_file.stem if self.audio_file else "transcript")).with_suffix('.txt').name
+        filename,_=QFileDialog.getSaveFileName(self,"Export Text",str(Path(self._dialog_directory(default)).joinpath(default)),"Text Files (*.txt);;All Files (*)")
+        if not filename: return
+        path=Path(filename)
+        if path.suffix.lower()!='.txt': path=path.with_suffix('.txt')
+        text=self.story_text(self.transcript.get('segments',[])) if self.transcript.get('segments') else self.transcript.get('text','')
+        path.write_text(text,encoding='utf-8'); self.log_activity(f"[EXPORT] Exported text to {path.name}"); QMessageBox.information(self,"Export Complete",f"Text exported to:\n{path}")
+
+    def open_media(self):
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Media",
+            self._dialog_directory(),
+            "Media Files (*.*);;All Files (*)",
+        )
+        if filename:
+            self._remember_open_directory(filename)
+            self.load_media_file(filename, source="file dialog")
+
+    def prepare_for_new_media(self):
+        """
+        Checks for unsaved changes before loading new media.
+        Bypasses interactive prompt during batch processing by auto-saving.
+        """
+        if self.project_dirty:
+            # If running a batch process, auto-save instead of asking via dialog
+            if getattr(self, "batch_active", False):
+                self.save_project(force=True)
+                return True
+
+            save_answer = QMessageBox.question(
+                self,
+                "Save Project?",
+                "The current project has unsaved changes. Would you like to save it before closing?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Yes
+            )
+            if save_answer == QMessageBox.StandardButton.Cancel:
+                return False
+            if save_answer == QMessageBox.StandardButton.Yes:
+                self.save_project(force=True)
+
+        return True
+
+    def _batch_media_error(self, message: str):
+        if hasattr(self, "log_activity"):
+            self.log_activity(f"[BATCH ERROR] {message}")
+        self.batch_active = False  # Reset active flag on batch failure
+        self.progress.hide()
+        self.cancel_button.hide()
+        self.set_processing_stage(None)
+        self.set_tools_actions_enabled(True)
+
+    def _batch_save_project_file(self):
+        """Saves project .json to dedicated directory structure during batch processing."""
+        if not self.audio_file:
+            return
+
+        base_dir = self.batch_settings.get("output") if hasattr(self, "batch_settings") else ""
+        if not base_dir or not os.path.exists(base_dir):
+            base_dir = self.get_default_save_directory()
+
+        base_name = safe_filename(Path(self.audio_file).stem)
+
+        try:
+            if self.batch_settings.get("unified_transcripts", False):
+                projects_dir = Path(base_dir) / "Projects"
+                projects_dir.mkdir(parents=True, exist_ok=True)
+                target_path = str(projects_dir / f"{base_name}.rtvs")
+            else:
+                project_dir, trans_dir, media_dir, _ = self.prepare_export_directories(
+                    base_dir, default_name=base_name, prompt_user=False
+                )
+                target_path = str(project_dir / f"{base_name}.rtvs")
+            self._write_project_file(target_path)
+            self.log_activity(f"[BATCH] Auto-saved project file to {target_path}")
+        except Exception as e:
+            self.log_activity(f"[BATCH ERROR] Failed to save project file for {self.audio_file}: {e}")
+
+    def _batch_export_current(self):
+        """Handles automatic export or project saving during batch processing."""
+        if not getattr(self, "batch_active", False) or not hasattr(self, "batch_settings"):
+            return
+
+        # 1. Save the project file (.json)
+        if self.batch_settings.get("save_project", True) or self.batch_settings.get("save_project_only", False):
+            self._batch_save_project_file()
+
+        # 2. If 'Save projects only' is checked, skip generating .txt, .docx, .srt, and media files
+        if self.batch_settings.get("save_project_only", False):
+            base_name = safe_filename(Path(self.audio_file).stem if self.audio_file else "file")
+            self.log_activity(
+                f"[BATCH] Finished processing {base_name}. Project session saved (exports skipped: 'Save projects only' mode).",
+                mark_dirty=False
+            )
+            return
+
+        # 3. Otherwise, proceed with requested transcript, subtitle, and media exports
+        base_dir = self.batch_settings.get("output") or self.get_default_save_directory()
+        if not base_dir or not os.path.exists(base_dir):
+            return
+
+        base_name = safe_filename(Path(self.audio_file).stem if self.audio_file else "batch_output")
+        unified_transcripts = self.batch_settings.get("unified_transcripts", False)
+
+        if unified_transcripts:
+            custom_trans = self.batch_settings.get("transcripts_output", "").strip()
+            if custom_trans:
+                export_target_dir = Path(custom_trans)
+            else:
+                export_target_dir = Path(base_dir) / "Transcripts"
+            export_target_dir.mkdir(parents=True, exist_ok=True)
+            export_directory = str(export_target_dir)
+            is_custom = True
+        else:
+            project_dir, _, _, _ = self.prepare_export_directories(base_dir, default_name=base_name, prompt_user=False)
+            export_directory = str(project_dir)
+            is_custom = False
+
+        formats = {
+            "txt": self.batch_settings.get("full_txt", True) or self.batch_settings.get("story_txt", False),
+            "docx": self.batch_settings.get("full_docx", True) or self.batch_settings.get("story_docx", False),
+            "srt": self.batch_settings.get("full_srt", False) or self.batch_settings.get("story_srt", False),
+            "vtt": self.batch_settings.get("full_vtt", False) or self.batch_settings.get("story_vtt", False),
+            "media": False,
+        }
+
+        options = {
+            "include_speakers": self.batch_settings.get("include_speakers", True),
+            "include_timestamps": self.batch_settings.get("include_timestamps", False),
+            "include_english": True,
+            "include_spanish": self.batch_settings.get("translate_es", False),
+            "translation_direction": self.batch_settings.get("translate_direction", "auto"),
+        }
+
+        scope = self.batch_settings.get("scope", "full")
+
+        try:
+            if scope in ("full", "both"):
+                self.export_full_episode(
+                    custom_formats=formats,
+                    custom_base=base_name,
+                    custom_options=options,
+                    directory=export_directory,
+                    show_completion=False,
+                    is_custom_location=is_custom,
+                )
+
+            if scope in ("stories", "both") and self.stories:
+                self.perform_stories_export(
+                    target_stories=self.stories,
+                    custom_formats=formats,
+                    custom_base=base_name,
+                    custom_options=options,
+                    directory=export_directory,
+                    show_completion=False,
+                    is_custom_location=is_custom,
+                )
+
+            self.log_activity(f"[BATCH] Successfully exported files for {base_name} to {export_directory}")
+        except Exception as e:
+            self.log_activity(f"[BATCH ERROR] Export failed for {base_name}: {e}")
+
+    def load_media_file(self, filename, source="media load", restore_adjacent_project=True):
+        path = Path(filename).resolve()
+        if not path.exists() or not path.is_file():
+            QMessageBox.warning(self, "Open Media", "The selected media file could not be found.")
+            return False
+
+        try:
+            # This triggers the save/discard/cancel workflow before opening new media[cite: 1]
+            if not self.prepare_for_new_media():
+                return False
+            if not self.confirm_stop_processing_for_media_change():
+                return False
+
+            self.media_generation += 1
+            self.story_job_token += 1
+            self.stop_waveform_worker()
+            self.stop_video_thumbnail_worker()
+
+            # Immediately clear existing transcript and project state so stale text doesn't linger
+            self.transcript = None
+            self.diarization = None
+            self.stories = []
+            self.translations = {}
+            self.segment_speaker_overrides = {}
+            self.speaker_names = {}
+            if hasattr(self, "transcript_view"):
+                self.transcript_view.clear()
+            if hasattr(self, "story_list"):
+                self.story_list.clear()
+
+            self.audio_file = path
+
+            probed_duration = self.probe_media_duration(path)
+            try:
+                self.player.setSource(QUrl.fromLocalFile(str(path)))
+            except Exception as player_err:
+                self.log_activity(f"[MEDIA] Media player initialization notice: {player_err}", mark_dirty=False)
+            self.current_media_is_video = self.is_video_file(path)
+            self.update_video_preview_state()
+            if hasattr(self, "timeline") and hasattr(self.timeline, "set_is_video"):
+                self.timeline.set_is_video(self.current_media_is_video)
+            if probed_duration is not None:
+                self.duration = probed_duration
+                self.timeline.set_duration(probed_duration)
+                self.time_label.setText(f"{format_time(0)} / {format_time(self.duration)}")
+
+            self.transcribe_action.setEnabled(True)
+            self.diarize_action.setEnabled(True)
+            self.auto_detect_action.setEnabled(True)
+            self.transcribe_diarize_action.setEnabled(True)
+            self.transcribe_diarize_detect_action.setEnabled(True)
+            if hasattr(self, "regen_waveform_action"):
+                self.regen_waveform_action.setEnabled(True)
+            if hasattr(self, "regen_thumbnails_action"):
+                self.regen_thumbnails_action.setEnabled(bool(self.current_media_is_video))
+            self.save_action.setEnabled(True)
+            if hasattr(self, "quick_save_button"):
+                self.quick_save_button.setEnabled(True)
+            self.save_as_action.setEnabled(True)
+
+            self.processing_status = {"transcription": False, "diarization": False, "stories": False}
+            self.current_selected_story_indices = []
+            self.refresh_story_list()
+
+            self.timeline.set_audio_filename(path.name)
+            self.timeline.set_waveform_peaks([])
+            self.timeline.set_position(0)
+            self.timeline.set_zoom(1.0)
+            self.timeline.scroll_offset = 0.0
+            self.current_position = 0
+            self.speaker_status.setText("Speaker detection has not been run.")
+
+            self.log_activity(f"[FILE] Opened media: {path.name} ({source})")
+
+            # Look for an associated project file; if found, load it; otherwise show a blank slate
+            if restore_adjacent_project:
+                project = self.find_adjacent_project(path)
+                if project:
+                    if self.load_project_file(project, prompt=False, preserve_media=True):
+                        self.log_activity(f"[PROJECT] Automatically restored project: {project.name}")
+                        return True
+                    self.log_activity(f"[WARNING] Adjacent project could not be restored: {project.name}")
+
+            if self.current_media_is_video:
+                self.log_activity("[MEDIA] Video detected; extracting its audio track for waveform generation.")
+            self.log_activity("[WAVEFORM] Starting local waveform generation.")
+            self.statusBar().showMessage(f"Loaded: {path.name}")
+            self.load_waveform_async()
+            self.start_video_thumbnail_generation()
+
+            self.project_file = None
+            self.project_dirty = False
+            self.update_window_title()
+            return True
+        except Exception as exc:
+            self.log_activity(f"[ERROR] Failed to open media '{path.name}': {exc}")
+            QMessageBox.critical(self, "Open Media Error", str(exc))
+            return False
+
+    def open_audio(self):
+        self.open_media()
+
+    def handle_media_drop(self, filename):
+        self.load_media_file(filename, source="timeline drag-and-drop")

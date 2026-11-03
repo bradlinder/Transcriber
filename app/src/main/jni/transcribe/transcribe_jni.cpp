@@ -153,7 +153,7 @@ void fill_run_params(const loaded_model *meta, transcribe_run_params *params,
     if (meta == nullptr || meta->max_timestamps == TRANSCRIBE_TIMESTAMPS_NONE) {
         params->timestamps = TRANSCRIBE_TIMESTAMPS_NONE;
     } else {
-        params->timestamps = TRANSCRIBE_TIMESTAMPS_SEGMENT;
+        params->timestamps = TRANSCRIBE_TIMESTAMPS_AUTO;
     }
 }
 
@@ -495,6 +495,51 @@ Java_org_scrib_transcriber_TranscribeLib_00024Companion_nativeSegmentBounds(JNIE
         }
         bounds.push_back(static_cast<jlong>(segment.t0_ms));
         bounds.push_back(static_cast<jlong>(segment.t1_ms));
+    }
+    jlongArray out = env->NewLongArray(static_cast<jsize>(bounds.size()));
+    env->SetLongArrayRegion(out, 0, static_cast<jsize>(bounds.size()), bounds.data());
+    return out;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_scrib_transcriber_TranscribeLib_00024Companion_nativeTokenCount(JNIEnv *, jobject, jlong sessionPtr) {
+    auto *live = reinterpret_cast<live_session *>(sessionPtr);
+    return live == nullptr ? 0 : transcribe_n_tokens(live->session);
+}
+
+JNIEXPORT jstring JNICALL
+Java_org_scrib_transcriber_TranscribeLib_00024Companion_nativeTokenText(JNIEnv *env, jobject, jlong sessionPtr, jint index) {
+    auto *live = reinterpret_cast<live_session *>(sessionPtr);
+    if (live == nullptr) {
+        return nullptr;
+    }
+    transcribe_token token;
+    transcribe_token_init(&token);
+    if (transcribe_get_token(live->session, index, &token) != TRANSCRIBE_OK) {
+        return nullptr;
+    }
+    return token.text == nullptr ? nullptr : env->NewStringUTF(token.text);
+}
+
+JNIEXPORT jlongArray JNICALL
+Java_org_scrib_transcriber_TranscribeLib_00024Companion_nativeTokenBounds(JNIEnv *env, jobject, jlong sessionPtr) {
+    auto *live = reinterpret_cast<live_session *>(sessionPtr);
+    const jint count = live == nullptr ? 0 : transcribe_n_tokens(live->session);
+    if (count <= 0) {
+        return env->NewLongArray(0);
+    }
+    std::vector<jlong> bounds;
+    bounds.reserve(static_cast<size_t>(count) * 2);
+    for (jint i = 0; i < count; ++i) {
+        transcribe_token token;
+        transcribe_token_init(&token);
+        if (transcribe_get_token(live->session, i, &token) != TRANSCRIBE_OK) {
+            bounds.push_back(0);
+            bounds.push_back(0);
+            continue;
+        }
+        bounds.push_back(static_cast<jlong>(token.t0_ms));
+        bounds.push_back(static_cast<jlong>(token.t1_ms));
     }
     jlongArray out = env->NewLongArray(static_cast<jsize>(bounds.size()));
     env->SetLongArrayRegion(out, 0, static_cast<jsize>(bounds.size()), bounds.data());

@@ -1,119 +1,63 @@
-# <a href="https://f-droid.org/packages/org.scrib.transcriber/" title="Scrib on F-Droid"><img src="images/icon.png" width="34" alt="Scrib on F-Droid"></a> <a href="https://github.com/23rd/Scrib/releases/latest" title="Scrib Max on GitHub releases"><img src="images/icon-max.png" width="34" alt="Scrib Max on GitHub releases"></a> Scrib
+# <a href="https://f-droid.org/packages/org.scrib.transcriber/" title="Transcriber on F-Droid"><img src="app/src/main/res/mipmap-xhdpi/ic_launcher.png" width="34" alt="Transcriber"></a> Transcriber
 
 [![F-Droid](https://img.shields.io/f-droid/v/org.scrib.transcriber.svg)](https://f-droid.org/packages/org.scrib.transcriber/)
 [![License](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
 
-On-device voice transcription for Android. Your audio never leaves your phone,
-until you choose otherwise.
+On-device, privacy-focused voice transcription and speaker diarization for Android. Your audio processing runs 100% locally on your phone.
 
-Scrib turns speech into text on your device, using open
-[Whisper](https://github.com/ggml-org/whisper.cpp) speech models. Nothing is
-uploaded — the app only goes online to download a model you choose, unless you
-move transcription to an endpoint yourself.
+Transcriber is an open-source fork of [Scrib](https://github.com/23rd/Scrib). It converts speech to text on your device using open [Whisper](https://github.com/ggml-org/whisper.cpp) speech models and performs automatic multi-speaker identification using WeSpeaker CAM++ neural voiceprint embeddings. Nothing is uploaded — the app operates fully offline unless you explicitly configure a remote endpoint.
 
-## Two ways to use it
+## Key Features
 
-- **Transcribe your own audio.** Pick any audio file on your phone and get the
-  text, right in the app, fully offline.
-- **A transcription engine for other apps.** Scrib also runs in the background.
-  Apps that support it — such as Forkgram — can turn a voice message into text
-  through Scrib, on your device. In that app's settings, choose Scrib as the
-  offline transcriber.
+- **Private On-Device Transcription:** Import `.wav`, `.mp3`, `.m4a`, `.aac`, or `.ogg` recordings from your phone or record live audio straight into the app.
+- **Neural Speaker Diarization:** 100% offline, ONNX-accelerated speaker identification powered by WeSpeaker CAM++ with $O(N^2)$ Centroid Vector AHC clustering, acoustic pause snapping, and word-level timestamp alignment.
+- **Interactive Speaker Label Management:** Tappable speaker labels in the full-screen transcript viewer allow:
+  - **Single Instance vs. Global Renaming:** Choose to rename **This Instance Only** (a specific speaker turn) or **All Instances** across the entire transcript.
+  - **Delete Speaker Labels:** Remove a label at a turn and reassign the text to the preceding speaker.
+  - **Insert Speaker Labels:** Add a new speaker label at any turn and assign following text until the next speaker change.
+- **Universal 1-Tap Undo (`↺`):** Instantly revert accidental speaker label edits, renames, or deletions.
+- **Contextual Speaker Change Labels:** Broadcast-style transcript formatting displays speaker labels only when the speaker actually changes across turns, avoiding repetitive label clutter.
+- **OpenXML Word `.docx` & Subtitle Export:** Export completed transcripts directly to Microsoft Word `.docx` (opens natively in Google Docs, Word, LibreOffice) formatted with timestamps and speaker headings, as well as `.txt`, `.srt`, `.vtt`, and `.lrc`.
+- **In-App Background Transcription & Floating Mini-Bar:** Minimize active transcription runs to browse history, models, or settings while transcription continues uninterrupted in the background, with live ETA, progress bar, and guarded cancellation.
+- **Full-Document Text Editing with Search & Replace:** Edit full transcript text directly with live search jumping, span highlighting, replace / replace-all, unsaved edit safeguards, and proportional neural timestamp preservation.
+- **Native Arbitrary Text Selection:** Integrated selection container enables standard Android touch handles for copying and sharing arbitrary text phrases across turns.
+- **High-Resolution Multi-Format Audio Decoding:** Hardware-accelerated decoding supporting 24-bit packed PCM, 32-bit integer PCM, IEEE-754 floats, 16-bit audio, Opus, OGG, and AAC with disk-backed memory-mapping to keep active RAM below 5 MB even on multi-hour recordings.
+- **Broadcast Workstation UI:** Material 3 user interface styled with a zinc/slate dark aesthetic and electric sky blue (`#38BDF8`) accents.
+- **Background AIDL Contract:** Supports the open **Open Transcribe** AIDL service contract (`org.opentranscribe.api`) so third-party Android client apps (such as Forkgram) can use Transcriber for offline voice notes.
 
-## Models
+## Speech Models
 
-Scrib transcribes with open speech models, through [transcribe.cpp][tc]: Whisper,
-Parakeet, SenseVoice, Canary, Moonshine, GigaAM, Qwen3-ASR, Nemotron, Voxtral
-and the rest, all read from one ggml runtime. Download one on the main screen, or
-pick your language and Scrib fetches a suitable one. Larger models are more
-accurate but slower and bigger to download; keep several and switch any time.
-You can also add any model the runtime reads by direct link, or import a file
-from your device — a legacy Whisper `.bin` or a `.gguf` of any family.
+Transcriber runs open neural speech models through `transcribe.cpp`: Whisper, Parakeet, SenseVoice, Canary, Moonshine, GigaAM, Qwen3-ASR, Nemotron, Voxtral, and others read from a unified ggml runtime. Download models directly inside the app or pick a language and Transcriber fetches a suitable size. You can also import any local `.bin` or `.gguf` model file directly from your device storage.
 
-Models are downloaded separately and are not bundled in the app.
+## Three Build Flavours
 
-[tc]: https://github.com/handy-computer/transcribe.cpp
-
-## Three builds
-
-Scrib ships in three flavours from this one repository. They differ in what they
-can run and in how much they weigh — not in what they promise you.
-
-- **Scrib** (`org.scrib.transcriber`) is the lean build, the one F-Droid ships.
-  Every ggml family above, small installer, nothing but model downloads over the
-  network.
-- **Scrib Max** (`org.scrib.transcriber.max`) is the extended build: the ggml
-  families plus everything the [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)
-  runtime covers and ggml does not — streaming Zipformer, Dolphin, FireRed,
-  Omnilingual — with transcription on a remote endpoint you configure. By far
-  the largest of the three.
-- **Scrib Remote** (`org.scrib.transcriber.remote`) has no models and no
-  inference code at all: it uploads the audio to a server you control. The
-  smallest of the three, and the same size on every phone.
-
-Separate application ids, so all three install side by side and none replaces
-another. Each is attached to every
-[GitHub release](https://github.com/23rd/Scrib/releases/tag/latest) as a
-universal apk and once per architecture — `arm64-v8a` for nearly every phone,
-`armeabi-v7a` for older 32-bit ones, `x86_64` and `x86` for emulators and
-Waydroid. Every one of them carries the same version code, so switching between
-them needs no uninstall.
-
-## For developers
-
-Any app can use Scrib as an offline transcriber through the open **Open
-Transcribe** contract (`org.opentranscribe.api`) — a small AIDL service, no SDK
-and no network. The contract is vendor-neutral, so apps aren't tied to Scrib:
-they can bind any compatible transcriber the user has installed. See
-[CONTRACT.md](CONTRACT.md).
+- **Transcriber** (`org.scrib.transcriber`): Lean build shipped on F-Droid. Every ggml model family, on-device WeSpeaker speaker diarization, small installer footprint (~20 MB).
+- **Transcriber Max** (`org.scrib.transcriber.max`): Extended build adding the [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) runtime (Zipformer, Dolphin, FireRed, Omnilingual).
+- **Transcriber Remote** (`org.scrib.transcriber.remote`): Lightweight client build without local inference runtimes that connects to an OpenAI-compatible remote transcription server.
 
 ## Building
 
-The native transcription library is compiled from the bundled `transcribe.cpp`
-submodule via CMake and the NDK, so clone with submodules:
+Clone with submodules to pull the bundled `transcribe.cpp` runtime:
 
-```
+```bash
 git clone --recurse-submodules <repo-url>
-cd scrib
+cd Transcriber
 ./gradlew :app:assembleRelease
 ```
 
-Requirements: Android SDK 35, NDK 27, CMake. `minSdk` 26, `arm64-v8a`.
+### Requirements
+- Android SDK 35
+- NDK 27 (`27.2.12479018`)
+- CMake 3.22+
+- `minSdk` 26, Target Architecture: `arm64-v8a`
 
-Scrib Max is the same build plus `-PwithSherpa`, which pulls in the extra sources
-and the sherpa runtime AAR:
-
-```
-scripts/download-sherpa-onnx.sh
-./gradlew :app:assembleRelease -PwithSherpa
-```
-
-Scrib Remote is `-PwithRemote`: the remote endpoints without any inference
-library, so no NDK, no submodule and no AAR.
-
-```
-./gradlew :app:assembleRelease -PwithRemote
-```
-
-Omit both flags and you get the lean Scrib that F-Droid builds. `-Pabis=` picks
-the architectures to compile and `-PabiSplits` adds one apk per architecture next
-to the universal one; the release workflow passes both.
+Output release APK: `app/build/outputs/apk/release/app-release.apk`
 
 ## Privacy
 
-By default transcription runs 100% on device: your voice messages never leave
-the phone, and the only network access is downloading a model you pick. The
-F-Droid build does nothing else.
-
-Scrib Max and Scrib Remote can also transcribe on a server instead — any
-OpenAI-compatible endpoint you configure, or Cloudflare Workers AI. While one is
-selected, the audio is uploaded there over HTTPS and the app names that address
-on screen. Remote has no other engine, so its audio always leaves the phone.
+Transcriber processes 100% of your audio locally on your device by default. Audio files and voice recordings are never uploaded to any remote server or external service. Network access is strictly limited to fetching models you explicitly choose to download.
 
 ## License
 
-Scrib is free software under the
-[GNU General Public License v3.0 or later](LICENSE).
-
-It bundles [whisper.cpp](https://github.com/ggml-org/whisper.cpp) (MIT,
-© The ggml authors), which runs the Whisper speech models.
+Transcriber is free software under the [GNU General Public License v3.0 or later](LICENSE).
+Bundles [whisper.cpp](https://github.com/ggml-org/whisper.cpp) (MIT, © The ggml authors).

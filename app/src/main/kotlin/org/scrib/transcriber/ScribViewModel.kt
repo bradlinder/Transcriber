@@ -39,7 +39,7 @@ data class ModelRow(
     val pinned: Boolean = false
 )
 
-data class ScribUiState(
+data class TranscriberUiState(
     val firstRun: Boolean,
     val activeName: String?,
     val standard: List<ModelRow>,
@@ -48,19 +48,20 @@ data class ScribUiState(
     val custom: List<ModelRow>,
     val statusMsg: String,
     val statusError: Boolean,
-    val skipSilence: Boolean,
-    val vadSupported: Boolean,
     val liveStats: Boolean,
-    val keyboardLayouts: KeyboardLayoutSettings,
-    // Progress of the one-off VAD model download, or -1 when nothing is being fetched.
-    val vadProgress: Int,
     val dictionaryEnabled: Boolean,
     val benchmarkRuns: List<BenchmarkRun>,
     val benchmarkBatch: BenchmarkBatchState,
     val benchmarkModelCount: Int,
     val history: List<TranscriptHistory.Entry>,
     val pinnedIds: Set<String>,
-    val remoteHost: String?
+    val remoteHost: String?,
+    val paragraphWordThreshold: Int = 70,
+    val diarizationSensitivityKey: String = "normal",
+    val expectedSpeakersKey: String = "auto",
+    val appTheme: String = "system",
+    val defaultExportFormat: String = "docx",
+    val colorizeSpeakerLabels: Boolean = false
 )
 
 // A take in progress: how long it has been running and the recent microphone levels the meter
@@ -76,17 +77,18 @@ data class TranscribeUi(
     val modelName: String? = null,
     val metrics: TranscriptionMetrics = TranscriptionMetrics(),
     val segments: List<TranscriptSegment> = emptyList(),
-    val format: TranscriptFormat = TranscriptFormat.TXT,
-    // How far whisper is through the audio, or -1 while the file is still being decoded.
+    val format: TranscriptFormat = TranscriptFormat.DOCX,
     val percent: Int = -1,
-    val etaMs: Long? = null
+    val etaMs: Long? = null,
+    val wordThreshold: Int = 70,
+    val showTimestamps: Boolean = true,
+    val showSpeakers: Boolean = true,
+    val colorizeSpeakerLabels: Boolean = false
 ) {
-    // What the screen shows and what Copy, Share and Save hand over. Falls back to the plain text
-    // while the run is still going and when nothing was recognised.
-    val formatted: String get() = if (segments.isEmpty()) text else segments.format(format)
+    val formatted: String get() = if (segments.isEmpty()) text else segments.format(format, wordThreshold, showTimestamps, showSpeakers)
 }
 
-class ScribViewModel(app: Application) : AndroidViewModel(app) {
+class TranscriberViewModel(app: Application) : AndroidViewModel(app) {
 
     private data class Progress(val pct: Int, val model: WhisperModel?)
 
@@ -99,7 +101,6 @@ class ScribViewModel(app: Application) : AndroidViewModel(app) {
     @Volatile private var vadPct = -1
     @Volatile private var benchmarkBatch = BenchmarkBatchState()
     private var vadJob: Job? = null
-    private var keyboardLayouts: KeyboardLayoutSettings? = null
 
     @Volatile private var sherpaBusy = false
 
@@ -107,11 +108,11 @@ class ScribViewModel(app: Application) : AndroidViewModel(app) {
     private fun str(id: Int, vararg args: Any): String = ctx.getString(id, *args)
 
     private val _state = MutableStateFlow(build())
-    val state: StateFlow<ScribUiState> = _state
+    val state: StateFlow<TranscriberUiState> = _state
 
     private fun push() { _state.value = build() }
 
-    private fun build(): ScribUiState {
+    private fun build(): TranscriberUiState {
         val installed = if (BuildConfig.LOCAL_MODELS) {
             ModelManager.installedFileNames(ctx).toHashSet()
         } else {
@@ -170,15 +171,12 @@ class ScribViewModel(app: Application) : AndroidViewModel(app) {
         val sherpaRows = (SherpaPlugins.plugin?.modelRows(ctx, active) ?: emptyList())
             .map { if (it.id in pinnedIds) it.copy(pinned = true) else it }
         val endpointReady = EndpointPlugins.plugin?.isActive(ctx) == true
-        return ScribUiState(
+        return TranscriberUiState(
             firstRun = !endpointReady && installed.isEmpty() && downloads.isEmpty() &&
                 sherpaRows.isEmpty() && !sherpaBusy && ModelManager.externalModel(ctx) == null,
             activeName = activeFriendly, standard = standard, sherpaRows = sherpaRows, sherpaBusy = sherpaBusy, custom = custom,
             statusMsg = statusMsg, statusError = statusError,
-            skipSilence = BuildConfig.LOCAL_MODELS && ModelManager.skipSilence(ctx), vadProgress = vadPct,
-            vadSupported = BuildConfig.LOCAL_MODELS && ModelManager.activeModelUsesVad(ctx),
             liveStats = ModelManager.liveStats(ctx),
-            keyboardLayouts = keyboardLayouts ?: KeyboardLayouts.settings(ctx).also { keyboardLayouts = it },
             dictionaryEnabled = Dictionary.isEnabled(ctx),
             benchmarkRuns = BenchmarkStore.load(ctx),
             benchmarkBatch = benchmarkBatch,
@@ -188,8 +186,31 @@ class ScribViewModel(app: Application) : AndroidViewModel(app) {
             remoteHost = EndpointPlugins.plugin
                 ?.takeIf { it.isActive(ctx) }
                 ?.host(ctx)
-                ?.takeIf { it.isNotEmpty() }
+                ?.takeIf { it.isNotEmpty() },
+            paragraphWordThreshold = ModelManager.paragraphWordThreshold(ctx),
+            diarizationSensitivityKey = ModelManager.diarizationSensitivityKey(ctx),
+            expectedSpeakersKey = ModelManager.expectedSpeakersKey(ctx),
+            appTheme = ModelManager.appTheme(ctx),
+            defaultExportFormat = ModelManager.defaultExportFormat(ctx),
+            colorizeSpeakerLabels = ModelManager.colorizeSpeakerLabels(ctx)
         )
+    }
+
+    fun setColorizeSpeakerLabels(enabled: Boolean) {
+        ModelManager.setColorizeSpeakerLabels(ctx, enabled)
+        TranscriptionRun.toggleColorizeSpeakers(enabled)
+        push()
+    }
+
+    fun setAppTheme(theme: String) {
+        ModelManager.setAppTheme(ctx, theme)
+        push()
+    }
+
+    fun setDefaultExportFormat(format: String) {
+        ModelManager.setDefaultExportFormat(ctx, format)
+        TranscriptionRun.setFormat(TranscriptFormat.fromString(format))
+        push()
     }
 
     fun download(fileName: String) {
@@ -289,64 +310,6 @@ class ScribViewModel(app: Application) : AndroidViewModel(app) {
         push()
     }
 
-    // Skipping silence needs a model of its own, fetched the first time it is asked for. The
-    // setting only goes on once that has landed, so it can never point at a model that isn't there.
-    fun setSkipSilence(enabled: Boolean) {
-        if (BenchmarkBatchGate.isActive) return
-        if (enabled && !ModelManager.activeModelUsesVad(ctx)) return
-        if (!enabled) {
-            vadJob?.cancel(); vadJob = null; vadPct = -1
-            ModelManager.setSkipSilence(ctx, false)
-            push(); return
-        }
-        val sherpaActive = SherpaPlugins.plugin?.selectedId(ctx) != null
-        val installed = if (sherpaActive) {
-            ModelManager.isSherpaVadInstalled(ctx)
-        } else {
-            ModelManager.isVadInstalled(ctx)
-        }
-        if (installed) {
-            ModelManager.setSkipSilence(ctx, true)
-            push(); return
-        }
-        if (vadJob != null) return
-        vadPct = 0
-        push()
-        vadJob = viewModelScope.launch {
-            try {
-                withContext(Dispatchers.IO) {
-                    if (sherpaActive) {
-                        ModelManager.downloadSherpaVad(ctx,
-                            onProgress = { done, total ->
-                                val pct = if (total > 0) ((done * 100) / total).toInt() else -1
-                                if (vadPct != pct) {
-                                    vadPct = pct
-                                    push()
-                                }
-                            },
-                            isCancelled = { !isActive })
-                    } else {
-                        ModelManager.downloadVad(ctx,
-                            onProgress = { done, total ->
-                                val pct = if (total > 0) ((done * 100) / total).toInt() else -1
-                                if (vadPct != pct) {
-                                    vadPct = pct
-                                    push()
-                                }
-                            },
-                            isCancelled = { !isActive })
-                    }
-                }
-                ModelManager.setSkipSilence(ctx, true)
-            } catch (e: ModelManager.CancelledDownloadException) {
-            } catch (e: Throwable) {
-                statusMsg = str(R.string.status_vad_failed); statusError = true
-            }
-            vadPct = -1; vadJob = null
-            push()
-        }
-    }
-
     fun setLiveStats(enabled: Boolean) {
         if (BenchmarkBatchGate.isActive) return
         ModelManager.setLiveStats(ctx, enabled)
@@ -366,15 +329,197 @@ class ScribViewModel(app: Application) : AndroidViewModel(app) {
         push()
     }
 
+    fun setParagraphWordThreshold(threshold: Int) {
+        ModelManager.setParagraphWordThreshold(ctx, threshold)
+        TranscriptionRun.setWordThreshold(threshold)
+        push()
+    }
+
+    fun setDiarizationSensitivity(sensKey: String) {
+        ModelManager.setDiarizationSensitivity(ctx, sensKey)
+        push()
+    }
+
+    fun setExpectedSpeakers(key: String) {
+        ModelManager.setExpectedSpeakers(ctx, key)
+        push()
+    }
+
+    fun renameSpeaker(oldName: String, newName: String) {
+        TranscriptionRun.renameSpeaker(oldName, newName)
+        push()
+    }
+
+    fun renameSpeakerInstance(segmentIndex: Int, newName: String) {
+        TranscriptionRun.renameSpeakerInstance(segmentIndex, newName)
+        push()
+    }
+
+    fun deleteSpeakerLabel(segmentIndex: Int) {
+        TranscriptionRun.deleteSpeakerLabel(segmentIndex)
+        push()
+    }
+
+    fun insertSpeakerLabel(segmentIndex: Int, newSpeakerName: String) {
+        TranscriptionRun.insertSpeakerLabel(segmentIndex, newSpeakerName)
+        push()
+    }
+
+    fun insertSpeakerLabelAtTimestamp(timestampMs: Long, newSpeakerName: String) {
+        TranscriptionRun.insertSpeakerLabelAtTimestamp(timestampMs, newSpeakerName)
+        push()
+    }
+
+    fun replaceTextInstance(matchIndex: Int, findText: String, replaceText: String) {
+        TranscriptionRun.replaceTextInstance(matchIndex, findText, replaceText)
+        push()
+    }
+
+    fun replaceAllText(findText: String, replaceText: String) {
+        TranscriptionRun.replaceAllText(findText, replaceText)
+        push()
+    }
+
+    fun updateTurnBlockText(segmentIndex: Int, oldText: String, newText: String) {
+        TranscriptionRun.updateTurnBlockText(segmentIndex, oldText, newText)
+        push()
+    }
+
+    fun toggleTimestamps(enabled: Boolean) {
+        TranscriptionRun.toggleTimestamps(enabled)
+        push()
+    }
+
+    fun toggleSpeakers(enabled: Boolean) {
+        TranscriptionRun.toggleSpeakers(enabled)
+        push()
+    }
+
+    fun queueBatchItems(files: List<Pair<Uri, String>>) {
+        val existing = BatchQueueManager.state.value.items
+        val newItems = files.mapIndexed { idx, (uri, name) ->
+            BatchItem(
+                id = "${System.currentTimeMillis()}_$idx",
+                uri = uri,
+                fileName = name
+            )
+        }
+        BatchQueueManager.setItems(existing + newItems)
+    }
+
+    fun startBatchProcessing() {
+        val currentBatch = BatchQueueManager.state.value
+        if (currentBatch.running || currentBatch.items.isEmpty()) return
+
+        BatchQueueManager.setRunning(true)
+        viewModelScope.launch(Dispatchers.IO) {
+            val items = BatchQueueManager.state.value.items
+            for ((idx, item) in items.withIndex()) {
+                if (item.status == BatchItemStatus.COMPLETED) continue
+
+                BatchQueueManager.setCurrentIndex(idx)
+                BatchQueueManager.updateItemStatus(item.id, BatchItemStatus.PROCESSING, percent = 5)
+
+                try {
+                    val runResult = executeSingleBatchItem(item.id, item.uri, item.fileName)
+                    if (runResult != null) {
+                        BatchQueueManager.updateItemStatus(
+                            item.id,
+                            BatchItemStatus.COMPLETED,
+                            percent = 100,
+                            resultText = runResult.text,
+                            segments = runResult.segments
+                        )
+                        TranscriptHistory.save(ctx, runResult)
+                    } else {
+                        BatchQueueManager.updateItemStatus(item.id, BatchItemStatus.FAILED, error = "Transcription failed")
+                    }
+                } catch (e: Throwable) {
+                    android.util.Log.e("ScribViewModel", "Batch item ${item.fileName} error: ${e.message}", e)
+                    BatchQueueManager.updateItemStatus(item.id, BatchItemStatus.FAILED, error = e.message ?: "Failed")
+                }
+            }
+            BatchQueueManager.setRunning(false)
+            historyCache = TranscriptHistory.load(ctx)
+            push()
+        }
+    }
+
+    private suspend fun executeSingleBatchItem(itemId: String, uri: Uri, fileName: String): TranscribeUi? {
+        val cancellation = CancellationToken()
+        val decodedAudio = try {
+            val pfd = ctx.contentResolver.openFileDescriptor(uri, "r")
+                ?: throw RuntimeException("Cannot open file descriptor for $uri")
+            try {
+                AudioDecoder.decodeToPcm16kMono(pfd, cancellation, ctx.cacheDir)
+            } finally {
+                try { pfd.close() } catch (_: Throwable) {}
+            }
+        } catch (e: Throwable) {
+            android.util.Log.e("ScribViewModel", "Single batch decode error for $fileName: ${e.message}", e)
+            return null
+        }
+
+        try {
+            val rawSegments = try {
+                TranscriptionEngine.get(ctx).transcribeDecodedToSegments(
+                    decodedAudio, "", cancellation,
+                    onProgress = { pct ->
+                        val scaledPct = (pct * 0.65f).toInt()
+                        BatchQueueManager.updateItemStatus(itemId, BatchItemStatus.PROCESSING, percent = scaledPct)
+                    },
+                    onPartial = {}
+                )
+            } catch (e: Throwable) {
+                android.util.Log.e("ScribViewModel", "Single batch ASR error for $fileName: ${e.message}", e)
+                return null
+            }
+
+            if (rawSegments.isEmpty()) {
+                return TranscribeUi(
+                    fileName = fileName,
+                    text = "",
+                    running = false,
+                    error = null,
+                    metrics = TranscriptionMetrics(),
+                    segments = emptyList(),
+                    format = TranscriptFormat.fromString(ModelManager.defaultExportFormat(ctx)),
+                    percent = 100
+                )
+            }
+
+            val segments = try {
+                DiarizationEngine.diarize(ctx, decodedAudio, 16000, rawSegments) { prog ->
+                    val scaledPct = 65 + (prog * 30).toInt().coerceIn(0, 30)
+                    BatchQueueManager.updateItemStatus(itemId, BatchItemStatus.PROCESSING, percent = scaledPct)
+                }
+            } catch (e: Throwable) {
+                android.util.Log.e("ScribViewModel", "Batch diarization error for $fileName: ${e.message}", e)
+                rawSegments
+            }
+
+            val wordThreshold = ModelManager.paragraphWordThreshold(ctx)
+            val format = TranscriptFormat.fromString(ModelManager.defaultExportFormat(ctx))
+            val formatted = segments.format(format, wordThreshold, showTimestamps = true, showSpeakers = true)
+
+            return TranscribeUi(
+                fileName = fileName,
+                text = formatted,
+                running = false,
+                error = null,
+                metrics = TranscriptionMetrics(),
+                segments = segments,
+                format = format,
+                percent = 100
+            )
+        } finally {
+            try { decodedAudio.close() } catch (_: Throwable) {}
+        }
+    }
+
     // Releasing blocks behind a running transcription, so it cannot happen on the main thread.
     private fun releaseSwitchedAwayModel() {
         viewModelScope.launch(Dispatchers.IO) { TranscriptionEngine.releaseAll(ctx) }
-    }
-
-    fun setKeyboardLayouts(enabled: Boolean, keys: List<String>, customKeys: List<String>) {
-        KeyboardLayouts.save(ctx, enabled, keys, customKeys)
-        keyboardLayouts = KeyboardLayouts.settings(ctx)
-        push()
     }
 
     fun setupForLanguage(language: LanguageOption) {
@@ -408,7 +553,6 @@ class ScribViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun refresh() {
-        keyboardLayouts = KeyboardLayouts.settings(ctx)
         push()
     }
 
@@ -480,6 +624,7 @@ class ScribViewModel(app: Application) : AndroidViewModel(app) {
 
     // The run itself lives outside the view model so that leaving the app cannot take it down.
     val transcription: StateFlow<TranscribeUi?> = TranscriptionRun.state
+    private var lastAutoSavedRunKey: String? = null
 
     init {
         TranscriptionRun.restore(ctx)
@@ -490,6 +635,21 @@ class ScribViewModel(app: Application) : AndroidViewModel(app) {
             BenchmarkRunner.state.collect {
                 benchmarkBatch = it
                 push()
+            }
+        }
+        viewModelScope.launch {
+            TranscriptionRun.state.collect { current ->
+                if (current != null && !current.running && current.error == null && current.text.isNotBlank() && current.percent == 100) {
+                    val key = "${current.fileName}_${current.segments.size}_${current.text.length}"
+                    if (key != lastAutoSavedRunKey) {
+                        lastAutoSavedRunKey = key
+                        withContext(Dispatchers.IO) {
+                            TranscriptHistory.save(ctx, current)
+                            historyCache = null
+                        }
+                        push()
+                    }
+                }
             }
         }
     }
@@ -510,14 +670,101 @@ class ScribViewModel(app: Application) : AndroidViewModel(app) {
         TranscriptionRun.setFormat(format)
     }
 
+    fun exportTranscriptFile(
+        uri: Uri,
+        fileName: String,
+        segments: List<TranscriptSegment>,
+        format: TranscriptFormat,
+        showTimestamps: Boolean = true,
+        showSpeakers: Boolean = true,
+        colorSpeakers: Boolean = false,
+        fallbackText: String = ""
+    ) {
+        val wordThreshold = ModelManager.paragraphWordThreshold(ctx)
+        viewModelScope.launch(Dispatchers.IO) {
+            AudioDecoder.cleanStaleTempFiles(ctx.cacheDir)
+            val ok = try {
+                if (format == TranscriptFormat.DOCX) {
+                    val tempFile = File.createTempFile("temp_export_", ".docx", ctx.cacheDir)
+                    DocxExporter.exportToDocx(tempFile, fileName, segments, wordThreshold, showTimestamps, showSpeakers, colorSpeakers)
+                    ctx.contentResolver.openOutputStream(uri, "w")?.use { out ->
+                        tempFile.inputStream().use { input -> input.copyTo(out) }
+                    }
+                    tempFile.delete()
+                    true
+                } else {
+                    val text = if (segments.isNotEmpty()) {
+                        segments.format(format, wordThreshold, showTimestamps, showSpeakers)
+                    } else fallbackText
+                    writeText(uri, text, "wt")
+                    true
+                }
+            } catch (e: Throwable) {
+                if (format == TranscriptFormat.DOCX) {
+                    false
+                } else {
+                    try {
+                        val text = if (segments.isNotEmpty()) {
+                            segments.format(format, wordThreshold, showTimestamps, showSpeakers)
+                        } else fallbackText
+                        writeText(uri, text, "w")
+                        true
+                    } catch (e2: Throwable) {
+                        false
+                    }
+                }
+            }
+            withContext(Dispatchers.Main) {
+                val msg = if (ok) R.string.transcript_saved else R.string.transcript_save_failed
+                Toast.makeText(ctx, str(msg), Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
     fun saveTranscript(uri: Uri) {
-        val text = transcription.value?.formatted ?: return
+        val t = transcription.value ?: return
+        exportTranscriptFile(
+            uri = uri,
+            fileName = t.fileName,
+            segments = t.segments,
+            format = t.format,
+            showTimestamps = t.showTimestamps,
+            showSpeakers = t.showSpeakers,
+            colorSpeakers = t.colorizeSpeakerLabels,
+            fallbackText = t.formatted
+        )
+    }
+
+    fun toggleTranscriptColorizeSpeakers(enabled: Boolean) {
+        TranscriptionRun.toggleColorizeSpeakers(enabled)
+    }
+
+    fun updateHistoryEntry(id: String, updatedSegments: List<TranscriptSegment>) {
+        viewModelScope.launch(Dispatchers.IO) {
+            TranscriptHistory.updateEntry(ctx, id, updatedSegments)
+            historyCache = null
+            withContext(Dispatchers.Main) {
+                push()
+            }
+        }
+    }
+
+    fun updateHistoryEntryColorize(id: String, colorize: Boolean) {
+        viewModelScope.launch(Dispatchers.IO) {
+            TranscriptHistory.updateColorize(ctx, id, colorize)
+            historyCache = null
+            withContext(Dispatchers.Main) {
+                push()
+            }
+        }
+    }
+
+    fun saveTextToUri(uri: Uri, text: String) {
         viewModelScope.launch(Dispatchers.IO) {
             val ok = try {
                 writeText(uri, text, "wt")
                 true
             } catch (e: Throwable) {
-                // Some providers reject the explicit truncate mode; retry with the default one.
                 try {
                     writeText(uri, text, "w")
                     true
@@ -569,6 +816,22 @@ class ScribViewModel(app: Application) : AndroidViewModel(app) {
         TranscriptHistory.delete(ctx, id)
         historyCache = null
         push()
+    }
+
+    fun deleteHistoryEntries(ids: Set<String>) {
+        viewModelScope.launch(Dispatchers.IO) {
+            ids.forEach { TranscriptHistory.delete(ctx, it) }
+            historyCache = null
+            push()
+        }
+    }
+
+    fun renameHistoryEntry(id: String, newName: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            TranscriptHistory.renameEntry(ctx, id, newName)
+            historyCache = null
+            push()
+        }
     }
 
     fun saveHistoryEntryToFile(id: String, uri: Uri) {

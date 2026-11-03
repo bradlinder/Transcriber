@@ -44,7 +44,7 @@ class BenchmarkHistoryActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         val activity = this
         setContent {
-            ScribTheme {
+            TranscriberTheme {
                 val revision by BenchmarkStore.revisions.collectAsState()
                 val runs = remember(revision) { BenchmarkStore.load(activity) }
                 val exportLauncher = rememberLauncherForActivityResult(

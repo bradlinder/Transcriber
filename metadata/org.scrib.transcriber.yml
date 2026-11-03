@@ -224,7 +224,376 @@ Builds:
       - yes
     ndk: '27.2.12479018'
 
+  - versionName: '0.24'
+    versionCode: 24
+    commit: v0.24
+    subdir: app
+    submodules: true
+    gradle:
+      - yes
+    ndk: '27.2.12479018'
+
+  - versionName: '0.25'
+    versionCode: 25
+    commit: v0.25
+    subdir: app
+    submodules: true
+    gradle:
+      - yes
+    ndk: '27.2.12479018'
+
+  - versionName: '0.26'
+    versionCode: 26
+    commit: v0.26
+    subdir: app
+    submodules: true
+    gradle:
+      - yes
+    ndk: '27.2.12479018'
+
+  - versionName: '0.27'
+    versionCode: 27
+    commit: v0.27
+    subdir: app
+    submodules: true
+    gradle:
+      - yes
+    ndk: '27.2.12479018'
+
+  - versionName: '0.28'
+    versionCode: 28
+    commit: v0.28
+    subdir: app
+    submodules: true
+    gradle:
+      - yes
+    ndk: '27.2.12479018'
+
+  - versionName: '0.29'
+    versionCode: 29
+    commit: v0.29
+    subdir: app
+    submodules: true
+    gradle:
+      - yes
+    ndk: '27.2.12479018'
+
+  - versionName: '0.30'
+    versionCode: 30
+    commit: v0.30
+    subdir: app
+    submodules: true
+    gradle:
+      - yes
+    ndk: '27.2.12479018'
+
+  - versionName: '0.31'
+    versionCode: 31
+    commit: v0.31
+    subdir: app
+    submodules: true
+    gradle:
+      - yes
+    ndk: '27.2.12479018'
+
+  - versionName: '0.32'
+    versionCode: 32
+    commit: v0.32
+    subdir: app
+    submodules: true
+    gradle:
+      - yes
+    ndk: '27.2.12479018'
+
+  - versionName: '0.33'
+    versionCode: 33
+    commit: v0.33
+    subdir: app
+    submodules: true
+    gradle:
+      - yes
+    ndk: '27.2.12479018'
+
+  - versionName: '0.34'
+    versionCode: 34
+    commit: v0.34
+    subdir: app
+    submodules: true
+    gradle:
+      - yes
+    ndk: '27.2.12479018'
+
+  - versionName: '0.35'
+    versionCode: 35
+    commit: v0.35
+    subdir: app
+    submodules: true
+    gradle:
+      - yes
+    ndk: '27.2.12479018'
+
+  - versionName: '0.36'
+    versionCode: 36
+    commit: v0.36
+    subdir: app
+    submodules: true
+    gradle:
+      - yes
+    ndk: '27.2.12479018'
+
+  - versionName: '0.37'
+    versionCode: 37
+    commit: v0.37
+    subdir: app
+    submodules: true
+    gradle:
+      - yes
+    ndk: '27.2.12479018'
+
+  - versionName: '0.38'
+    versionCode: 38
+    commit: v0.38
+    subdir: app
+    submodules: true
+    gradle:
+      - yes
+    ndk: '27.2.12479018'
+
+  - versionName: '0.39'
+    versionCode: 39
+    commit: v0.39
+    subdir: app
+    submodules: true
+    gradle:
+      - yes
+    ndk: '27.2.12479018'
+
+  - versionName: '0.40'
+    versionCode: 40
+    commit: v0.40
+    subdir: app
+    submodules: true
+    gradle:
+      - yes
+    ndk: '27.2.12479018'
+
+  - versionName: '0.41'
+    versionCode: 41
+    commit: v0.41
+    subdir: app
+    submodules: true
+    gradle:
+      - yes
+    ndk: '27.2.12479018'
+
+  - versionName: '0.42'
+    versionCode: 42
+    commit: v0.42
+    subdir: app
+    submodules: true
+    gradle:
+      - yes
+    ndk: '27.2.12479018'
+
+  - versionName: '0.43'
+    versionCode: 43
+    commit: v0.43
+    subdir: app
+    submodules: true
+    gradle:
+      - yes
+    ndk: '27.2.12479018'
+
+  - versionName: '0.44'
+    versionCode: 44
+    commit: v0.44
+    subdir: app
+    submodules: true
+    gradle:
+      - yes
+    ndk: '27.2.12479018'
+
+  - versionName: '0.45'
+    versionCode: 45
+    commit: v0.45
+    subdir: app
+    submodules: true
+    gradle:
+      - yes
+    ndk: '27.2.12479018'
+
+  - versionName: '0.46'
+    versionCode: 46
+    commit: v0.46
+    subdir: app
+    submodules: true
+    gradle:
+      - yes
+    ndk: '27.2.12479018'
+
+  - versionName: '0.47'
+    versionCode: 47
+    commit: v0.47
+    subdir: app
+    submodules: true
+    gradle:
+      - yes
+    ndk: '27.2.12479018'
+
+  - versionName: '0.48'
+    versionCode: 48
+    commit: v0.48
+    subdir: app
+    submodules: true
+    gradle:
+      - yes
+    ndk: '27.2.12479018'
+
+  - versionName: '0.49'
+    versionCode: 49
+    commit: v0.49
+    subdir: app
+    submodules: true
+    gradle:
+      - yes
+    ndk: '27.2.12479018'
+
+  - versionName: '0.50'
+    versionCode: 50
+    commit: v0.50
+    subdir: app
+    submodules: true
+    gradle:
+      - yes
+    ndk: '27.2.12479018'
+
+  - versionName: '0.51'
+    versionCode: 51
+    commit: v0.51
+    subdir: app
+    submodules: true
+    gradle:
+      - yes
+    ndk: '27.2.12479018'
+
+  - versionName: '0.52'
+    versionCode: 52
+    commit: v0.52
+    subdir: app
+    submodules: true
+    gradle:
+      - yes
+    ndk: '27.2.12479018'
+
+  - versionName: '0.53'
+    versionCode: 53
+    commit: v0.53
+    subdir: app
+    submodules: true
+    gradle:
+      - yes
+    ndk: '27.2.12479018'
+
+  - versionName: '0.54'
+    versionCode: 54
+    commit: v0.54
+    subdir: app
+    submodules: true
+    gradle:
+      - yes
+    ndk: '27.2.12479018'
+
+  - versionName: '0.55'
+    versionCode: 55
+    commit: v0.55
+    subdir: app
+    submodules: true
+    gradle:
+      - yes
+    ndk: '27.2.12479018'
+
+  - versionName: '0.56'
+    versionCode: 56
+    commit: v0.56
+    subdir: app
+    submodules: true
+    gradle:
+      - yes
+    ndk: '27.2.12479018'
+
+  - versionName: '0.57'
+    versionCode: 57
+    commit: v0.57
+    subdir: app
+    submodules: true
+    gradle:
+      - yes
+    ndk: '27.2.12479018'
+
+  - versionName: '0.58'
+    versionCode: 58
+    commit: v0.58
+    subdir: app
+    submodules: true
+    gradle:
+      - yes
+    ndk: '27.2.12479018'
+
+  - versionName: '0.59'
+    versionCode: 59
+    commit: v0.59
+    subdir: app
+    submodules: true
+    gradle:
+      - yes
+    ndk: '27.2.12479018'
+
+  - versionName: '0.60'
+    versionCode: 60
+    commit: v0.60
+    subdir: app
+    submodules: true
+    gradle:
+      - yes
+    ndk: '27.2.12479018'
+
+  - versionName: '0.61'
+    versionCode: 61
+    commit: v0.61
+    subdir: app
+    submodules: true
+    gradle:
+      - yes
+    ndk: '27.2.12479018'
+
+  - versionName: '0.62'
+    versionCode: 62
+    commit: v0.62
+    subdir: app
+    submodules: true
+    gradle:
+      - yes
+    ndk: '27.2.12479018'
+
+  - versionName: '0.63'
+    versionCode: 63
+    commit: v0.63
+    subdir: app
+    submodules: true
+    gradle:
+      - yes
+    ndk: '27.2.12479018'
+
+  - versionName: '0.64'
+    versionCode: 64
+    commit: v0.64
+    subdir: app
+    submodules: true
+    gradle:
+      - yes
+    ndk: '27.2.12479018'
+
 AutoUpdateMode: Version v%v
 UpdateCheckMode: Tags
-CurrentVersion: '0.23'
-CurrentVersionCode: 23
+CurrentVersion: '0.64'
+CurrentVersionCode: 64

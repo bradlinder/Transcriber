@@ -43,6 +43,15 @@ interface TranscriptionEngine {
         onMetrics: (TranscriptionMetrics) -> Unit = {}
     ): List<TranscriptSegment>
 
+    fun transcribeDecodedToSegments(
+        pcm: DecodedAudio,
+        languageHint: String?,
+        cancellation: CancellationToken,
+        onProgress: (Int) -> Unit = {},
+        onPartial: (String) -> Unit = {},
+        onMetrics: (TranscriptionMetrics) -> Unit = {}
+    ): List<TranscriptSegment> = emptyList()
+
     // The caller starts the returned stream and feeds it PCM as it is captured.
     fun openStream(request: StreamRequest?, callback: ITranscriptionCallback): AudioStream
 

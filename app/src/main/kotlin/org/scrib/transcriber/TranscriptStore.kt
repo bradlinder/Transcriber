@@ -21,12 +21,14 @@ object TranscriptStore {
                         .put(END, it.endMs)
                         .put(TEXT, it.text)
                         .put(PARAGRAPH, it.startsParagraph)
+                        .put(SPEAKER, it.speaker)
                 )
             }
             val json = JSONObject()
                 .put(NAME, transcript.fileName)
                 .put(MODEL, transcript.modelName)
                 .put(TEXT, transcript.text)
+                .put(FORMAT, transcript.format.extension)
                 .put(SEGMENTS, segments)
                 .put(METRICS, JSONObject()
                     .put(AUDIO_DURATION_MS, transcript.metrics.audioDurationMs)
@@ -48,7 +50,7 @@ object TranscriptStore {
 
     fun load(context: Context): TranscribeUi? = try {
         val file = file(context)
-        if (file.exists()) read(file) else null
+        if (file.exists()) read(file, context) else null
     } catch (e: Throwable) {
         Log.w(LOG_TAG, "Couldn't read the kept transcript", e)
         null
@@ -62,7 +64,7 @@ object TranscriptStore {
         }
     }
 
-    private fun read(file: File): TranscribeUi? {
+    private fun read(file: File, context: Context): TranscribeUi? {
         val json = JSONObject(file.readText())
         val text = json.optString(TEXT)
         if (text.isBlank()) {
@@ -77,11 +79,14 @@ object TranscriptStore {
                     segment.optLong(START),
                     segment.optLong(END),
                     segment.optString(TEXT),
-                    segment.optBoolean(PARAGRAPH)
+                    segment.optBoolean(PARAGRAPH),
+                    speaker = segment.optString(SPEAKER)
                 )
             )
         }
         val metrics = json.optJSONObject(METRICS) ?: JSONObject()
+        val rawFormat = json.optString(FORMAT).takeIf { it.isNotBlank() } ?: ModelManager.defaultExportFormat(context)
+        val format = TranscriptFormat.fromString(rawFormat)
         return TranscribeUi(
             fileName = json.optString(NAME),
             text = text,
@@ -101,7 +106,9 @@ object TranscriptStore {
                 freeRamMb = metrics.optInt(FREE_RAM_MB)
             ),
             segments = segments,
-            percent = 100
+            format = format,
+            percent = 100,
+            colorizeSpeakerLabels = ModelManager.colorizeSpeakerLabels(context)
         )
     }
 
@@ -110,8 +117,10 @@ object TranscriptStore {
     private const val NAME = "name"
     private const val MODEL = "model"
     private const val TEXT = "text"
+    private const val FORMAT = "format"
     private const val SEGMENTS = "segments"
     private const val METRICS = "metrics"
+    private const val SPEAKER = "speaker"
     private const val AUDIO_DURATION_MS = "audioDurationMs"
     private const val DECODE_MS = "decodeMs"
     private const val INFERENCE_MS = "inferenceMs"

@@ -14,7 +14,8 @@ object TranscriptHistory {
         val fileName: String,
         val modelName: String?,
         val text: String,
-        val segments: List<TranscriptSegment>
+        val segments: List<TranscriptSegment>,
+        val colorizeSpeakerLabels: Boolean? = null
     )
 
     fun save(context: Context, transcript: TranscribeUi): Entry {
@@ -24,7 +25,8 @@ object TranscriptHistory {
             fileName = transcript.fileName,
             modelName = transcript.modelName,
             text = transcript.text,
-            segments = transcript.segments
+            segments = transcript.segments,
+            colorizeSpeakerLabels = transcript.colorizeSpeakerLabels
         )
         write(context, entry)
         return entry
@@ -44,6 +46,44 @@ object TranscriptHistory {
         }
     }
 
+    fun renameEntry(context: Context, id: String, newName: String) {
+        try {
+            val existing = file(context, id)
+            if (!existing.exists()) return
+            val entry = read(existing) ?: return
+            val cleanName = newName.trim().ifBlank { entry.fileName }
+            val updatedEntry = entry.copy(fileName = cleanName)
+            write(context, updatedEntry)
+        } catch (e: Throwable) {
+            Log.w(LOG_TAG, "Couldn't rename history entry $id", e)
+        }
+    }
+
+    fun updateEntry(context: Context, id: String, updatedSegments: List<TranscriptSegment>) {
+        try {
+            val existing = file(context, id)
+            if (!existing.exists()) return
+            val entry = read(existing) ?: return
+            val newText = updatedSegments.format(TranscriptFormat.TXT)
+            val updatedEntry = entry.copy(text = newText, segments = updatedSegments)
+            write(context, updatedEntry)
+        } catch (e: Throwable) {
+            Log.w(LOG_TAG, "Couldn't update history entry $id", e)
+        }
+    }
+
+    fun updateColorize(context: Context, id: String, colorize: Boolean) {
+        try {
+            val existing = file(context, id)
+            if (!existing.exists()) return
+            val entry = read(existing) ?: return
+            val updatedEntry = entry.copy(colorizeSpeakerLabels = colorize)
+            write(context, updatedEntry)
+        } catch (e: Throwable) {
+            Log.w(LOG_TAG, "Couldn't update history entry colorize $id", e)
+        }
+    }
+
     private fun write(context: Context, entry: Entry) {
         try {
             val segments = JSONArray()
@@ -54,6 +94,7 @@ object TranscriptHistory {
                         .put(END, it.endMs)
                         .put(TEXT, it.text)
                         .put(PARAGRAPH, it.startsParagraph)
+                        .put(SPEAKER, it.speaker)
                 )
             }
             val json = JSONObject()
@@ -63,6 +104,9 @@ object TranscriptHistory {
                 .put(MODEL, entry.modelName.orEmpty())
                 .put(TEXT, entry.text)
                 .put(SEGMENTS, segments)
+            if (entry.colorizeSpeakerLabels != null) {
+                json.put(COLORIZE_SPEAKERS, entry.colorizeSpeakerLabels)
+            }
             dir(context).mkdirs()
             file(context, entry.id).writeText(json.toString())
         } catch (e: Throwable) {
@@ -85,7 +129,8 @@ object TranscriptHistory {
                     segment.optLong(START),
                     segment.optLong(END),
                     segment.optString(TEXT),
-                    segment.optBoolean(PARAGRAPH)
+                    segment.optBoolean(PARAGRAPH),
+                    speaker = segment.optString(SPEAKER)
                 )
             )
         }
@@ -95,7 +140,8 @@ object TranscriptHistory {
             fileName = json.optString(NAME),
             modelName = json.optString(MODEL).takeIf { it.isNotBlank() },
             text = text,
-            segments = segments
+            segments = segments,
+            colorizeSpeakerLabels = if (json.has(COLORIZE_SPEAKERS)) json.getBoolean(COLORIZE_SPEAKERS) else null
         )
     }
 
@@ -114,4 +160,6 @@ object TranscriptHistory {
     private const val START = "start"
     private const val END = "end"
     private const val PARAGRAPH = "paragraph"
+    private const val SPEAKER = "speaker"
+    private const val COLORIZE_SPEAKERS = "colorizeSpeakerLabels"
 }

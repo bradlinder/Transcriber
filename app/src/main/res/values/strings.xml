@@ -17,17 +17,16 @@
 
     <string name="setup_transcription">Set up transcription</string>
     <string name="nudge_body">No speech model yet. Download one to start — Base is a balanced choice: small download, solid accuracy, works in any language.</string>
-    <string name="nudge_remote_body">Scrib Remote keeps no model on the phone. Point it at a transcription server below — your own, or any OpenAI-compatible one — and the audio is sent there.</string>
+    <string name="nudge_remote_body">Transcriber Remote keeps no model on the phone. Point it at a transcription server below — your own, or any OpenAI-compatible one — and the audio is sent there.</string>
     <string name="download_named_size">Download %1$s · ≈%2$d MB</string>
 
     <string name="nav_home">Home</string>
-    <string name="nav_record">Record</string>
+    <string name="nav_record">Transcripts</string>
     <string name="nav_transcribe">Transcribe</string>
-    <string name="nav_keyboard">Keyboard</string>
     <string name="nav_settings">Settings</string>
     <string name="file_entry_sub">Pick an audio or video file and transcribe it</string>
-    <string name="history_section_title">Recordings</string>
-    <string name="history_saved">Saved to recordings.</string>
+    <string name="history_section_title">Saved Transcripts</string>
+    <string name="history_saved">Saved to Transcripts.</string>
     <string name="quick_access_title">Quick access</string>
     <string name="quick_access_add">Add to Home</string>
     <string name="quick_access_remove">Remove from Home</string>
@@ -63,7 +62,7 @@
     <string name="benchmark_info_title">What do the metrics mean?</string>
     <string name="benchmark_info_rtf">Real-time factor: processing time divided by audio duration. Lower is faster.</string>
     <string name="benchmark_info_load">Model load: time spent loading the speech model into memory.</string>
-    <string name="benchmark_info_model_pss">Model PSS (proportional set size): what the process holds for the model once the run is over — a model mapped in from disk only reaches memory as the engine reads it, so an earlier reading understates it.</string>
+    <string name="benchmark_info_model_pss">Model PSS (proportional set size): what the process holds for the model once the run is over.</string>
     <string name="benchmark_info_model_delta">Model delta: what the model added, from before the run to the end of it.</string>
     <string name="benchmark_info_peak">Peak: highest memory usage during the run.</string>
     <string name="benchmark_info_free">Free RAM: memory available on the device after the run.</string>
@@ -85,45 +84,9 @@
     <string name="record_failed">Couldn\'t start recording — another app may be using the microphone.</string>
     <string name="record_empty">Nothing was recorded.</string>
 
-    <string name="vad_entry_title">Skip silence</string>
-    <string name="vad_entry_sub">Faster transcriptions without silence. One-off 1 MB download.</string>
-    <string name="vad_entry_downloading">Downloading the speech detector… %1$d%%</string>
-    <string name="vad_entry_unsupported">This model reads the whole recording and needs no detector.</string>
-    <string name="status_vad_failed">Couldn\'t download the speech detector — check your connection and try again.</string>
-
     <string name="live_stats_entry_title">Live performance stats</string>
     <string name="live_stats_entry_sub">Shows speed and memory while transcribing.</string>
     <string name="live_stats_entry_on">Live — figures update as the run goes</string>
-
-    <string name="ime_label">Scrib Voice</string>
-    <string name="ime_entry_title">Voice keyboard</string>
-    <string name="ime_entry_sub">Dictate into any app</string>
-    <string name="ime_ready">Tap the microphone to dictate.</string>
-    <string name="ime_listening">Listening… text appears at every pause.</string>
-    <string name="ime_finishing">Transcribing the last words…</string>
-    <string name="ime_speak">Speak</string>
-    <string name="ime_backspace">Backspace</string>
-    <string name="ime_keyboard">Keyboard</string>
-    <string name="ime_needs_model">No speech model yet — open Scrib and download one.</string>
-    <string name="ime_needs_endpoint">No transcription endpoint yet — open Scrib and set one up.</string>
-    <string name="ime_layout_buttons_title">Keyboard layout buttons</string>
-    <string name="ime_layout_buttons_show">Show layout buttons</string>
-    <string name="ime_layout_buttons_hint">Choose enabled keyboard layouts. Their order is the order of the buttons. Turn this off to keep one generic keyboard button.</string>
-    <string name="ime_layout_buttons_empty">No enabled keyboard layouts were found. Enable a keyboard in system settings first.</string>
-    <string name="ime_layout_buttons_open">Open keyboard settings</string>
-    <string name="ime_layout_buttons_clear">Clear selected</string>
-    <string name="ime_layout_buttons_off">One generic keyboard button</string>
-    <string name="ime_layout_buttons_none">No layout buttons</string>
-    <string name="ime_layout_buttons_on">Custom layout buttons</string>
-    <string name="ime_custom_keys_title">Custom insert keys</string>
-    <string name="ime_custom_keys_hint">Anything you want to insert with one tap — \".\", \"!\", \"?\" or a whole phrase. Their order is the order of the buttons.</string>
-    <string name="ime_custom_keys_add_hint">New key, e.g. ?!</string>
-    <string name="ime_custom_keys_add">Add</string>
-    <string name="ime_custom_keys_empty">No custom keys yet.</string>
-    <string name="ime_custom_keys_delete">Remove %1$s</string>
-    <string name="ime_custom_keys_move_up">Move %1$s up</string>
-    <string name="ime_custom_keys_move_down">Move %1$s down</string>
-    <string name="ime_custom_keys_edit">Edit %1$s</string>
 
     <string name="models_explainer">Bigger models are more accurate but slower and larger to download. English-only models are smaller and faster; for other languages choose Base or larger — Tiny is weak.</string>
     <string name="standard_models">STANDARD MODELS</string>
@@ -163,7 +126,7 @@
     <string name="delete_model_q">Delete model?</string>
 
     <string name="lang_entry_title">Find a model for your language</string>
-    <string name="lang_entry_sub">Pick a language — Scrib downloads the right model</string>
+    <string name="lang_entry_sub">Pick a language — Transcriber downloads the right model</string>
     <string name="your_language">Your language</string>
     <string name="lang_dialog_hint">One multilingual model covers ~99 languages — this picks a good size and downloads it.</string>
 
@@ -226,20 +189,26 @@
     <string name="about_back">Back</string>
     <string name="about_tagline">On-device speech-to-text. Your audio never leaves your phone.</string>
     <string name="about_tagline_remote">Speech-to-text through a server you control. Your audio is uploaded to it.</string>
-    <string name="about_two_ways">Two ways to use Scrib</string>
+    <string name="about_two_ways">Two ways to use Transcriber</string>
     <string name="about_own_h">Transcribe your own audio</string>
     <string name="about_own_b">Record straight into the app, or pick any audio file on your phone, and get the text — right here, fully offline.</string>
     <string name="about_own_b_remote">Record straight into the app, or pick any audio file on your phone, and get the text. The audio goes to your endpoint, is transcribed there, and the text comes back.</string>
     <string name="about_engine_h">A transcription engine for other apps</string>
-    <string name="about_engine_b">Scrib also works in the background. Apps that support it — like Forkgram — can turn a voice message into text using Scrib, on your device. In that app\'s settings, choose Scrib as the offline transcriber. Nothing is uploaded.</string>
-    <string name="about_engine_b_remote">Scrib also works in the background. Apps that support it — like Forkgram — can turn a voice message into text using Scrib. In that app\'s settings, choose Scrib as the transcriber. The recording is uploaded to your endpoint.</string>
-    <string name="about_keyboard_h">Dictate into any app</string>
-    <string name="about_keyboard_b">Scrib can act as a voice keyboard. Switch it on in your phone\'s keyboard settings, then press the microphone key of a keyboard like HeliBoard, or pick Scrib Voice from the keyboard switcher, and speak — the text goes straight into whatever you were writing, and your keyboard comes back when you stop.</string>
+    <string name="about_engine_b">Transcriber also works in the background. Apps that support it — like Forkgram — can turn a voice message into text using Transcriber, on your device. In that app\'s settings, choose Transcriber as the offline transcriber. Nothing is uploaded.</string>
+    <string name="about_engine_b_remote">Transcriber also works in the background. Apps that support it — like Forkgram — can turn a voice message into text using Transcriber. In that app\'s settings, choose Transcriber as the transcriber. The recording is uploaded to your endpoint.</string>
     <string name="about_models_h">Models</string>
     <string name="about_endpoint_h">Endpoint</string>
-    <string name="about_models_b">Scrib transcribes with open speech models through one small ggml runtime: Whisper, Parakeet, SenseVoice, Canary, Moonshine, GigaAM and more. Download one on the main screen, or pick your language and Scrib fetches a fitting one. Bigger models are more accurate; keep several and switch anytime.</string>
-    <string name="about_endpoint_b">There is no model on this phone and no inference code: Scrib Remote is the recorder, the uploader and the editor. Point it at any OpenAI-compatible server — whisper.cpp, faster-whisper, Speaches, LM Studio — or at Cloudflare Workers AI, and it sends the audio there over HTTPS, naming the address on screen.</string>
+    <string name="about_models_b">Transcriber transcribes with open speech models through one small ggml runtime: Whisper, Parakeet, SenseVoice, Canary, Moonshine, GigaAM and more. Download one on the main screen, or pick your language and Transcriber fetches a fitting one. Bigger models are more accurate; keep several and switch anytime.</string>
+    <string name="about_endpoint_b">There is no model on this phone and no inference code: Transcriber Remote is the recorder, the uploader and the editor. Point it at any OpenAI-compatible server — whisper.cpp, faster-whisper, Speaches, LM Studio — or at Cloudflare Workers AI, and it sends the audio there over HTTPS, naming the address on screen.</string>
+    <string name="about_diarization_h" translatable="false">Neural Speaker Diarization &amp; Editing</string>
+    <string name="about_diarization_b" translatable="false">Transcriber features 100% offline multi-speaker identification using WeSpeaker CAM++ neural voiceprints. Easily rename speakers for a single instance or globally, delete or insert speaker labels at sentence boundaries, and undo edits with 1 tap. Export complete transcripts to formatted Microsoft Word .docx, .txt, or subtitle files (.srt, .vtt, .lrc).</string>
     <string name="about_dev_h">For developers</string>
-    <string name="about_dev_b">Any app can use Scrib as an offline transcriber through the open Open Transcribe contract (org.opentranscribe.api) — a small AIDL service, no SDK and no network. The contract is vendor-neutral, so apps aren\'t tied to Scrib: they can bind any compatible transcriber the user has installed.</string>
+    <string name="about_dev_b">Any app can use Transcriber as an offline transcriber through the open Open Transcribe contract (org.opentranscribe.api) — a small AIDL service, no SDK and no network. The contract is vendor-neutral, so apps aren\'t tied to Transcriber: they can bind any compatible transcriber the user has installed.</string>
+    <string name="about_fork_note" translatable="false">Transcriber is an open-source fork of Scrib (https://github.com/23rd/Scrib).</string>
     <string name="about_version">Version %s</string>
+    <string name="vad_entry_title">Skip silence</string>
+    <string name="vad_entry_sub">Faster transcription with silence skipped. One-time 1 MB download.</string>
+    <string name="vad_entry_downloading">Downloading voice activity detector… %1$d%%</string>
+    <string name="vad_entry_unsupported">This model reads the whole recording and does not need a detector.</string>
+    <string name="status_vad_failed">Could not download voice detector — check your connection and try again.</string>
 </resources>

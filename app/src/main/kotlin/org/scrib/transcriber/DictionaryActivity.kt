@@ -25,6 +25,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -38,9 +39,9 @@ class DictionaryActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            ScribTheme {
-                var enabled by remember { mutableStateOf(Dictionary.isEnabled(this)) }
-                var text by remember { mutableStateOf(Dictionary.getRules(this)) }
+            TranscriberTheme {
+                var enabled by rememberSaveable { mutableStateOf(Dictionary.isEnabled(this)) }
+                var text by rememberSaveable { mutableStateOf(Dictionary.getRules(this)) }
                 val importLauncher = rememberLauncherForActivityResult(
                     ActivityResultContracts.OpenDocument()
                 ) { uri ->

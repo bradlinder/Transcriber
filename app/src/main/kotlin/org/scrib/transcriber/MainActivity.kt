@@ -6,11 +6,14 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -23,20 +26,29 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 
 class MainActivity : ComponentActivity() {
 
-    private val sharedVm: ScribViewModel by viewModels()
-
-    private var pendingMicrophone = false
+    private val sharedVm: TranscriberViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // Only on the first creation: a recreation (rotation) must not restart the work.
         if (savedInstanceState == null) {
             maybeTranscribeShared(intent)
-            takeMicrophoneRequest(intent)
         }
         setContent {
-            ScribTheme {
-                val vm: ScribViewModel = viewModel()
+            val vm: TranscriberViewModel = viewModel()
+            val state by vm.state.collectAsState()
+            val recording by vm.recording.collectAsState()
+            val transcription by vm.transcription.collectAsState()
+
+            LaunchedEffect(recording) {
+                if (recording != null) {
+                    window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                } else {
+                    window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                }
+            }
+
+            TranscriberTheme(themeMode = state.appTheme) {
                 val lifecycleOwner = LocalLifecycleOwner.current
                 DisposableEffect(lifecycleOwner) {
                     val observer = LifecycleEventObserver { _, event ->
@@ -47,15 +59,29 @@ class MainActivity : ComponentActivity() {
                     lifecycleOwner.lifecycle.addObserver(observer)
                     onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
                 }
-                val state by vm.state.collectAsState()
-                val recording by vm.recording.collectAsState()
-                val transcription by vm.transcription.collectAsState()
+                val batchPicker = rememberLauncherForActivityResult(
+                    androidx.activity.result.contract.ActivityResultContracts.OpenMultipleDocuments()
+                ) { uris ->
+                    if (uris.isNotEmpty()) {
+                        val files = uris.map { uri ->
+                            runCatching {
+                                contentResolver.takePersistableUriPermission(
+                                    uri,
+                                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+                                )
+                            }
+                            uri to (queryDisplayName(this@MainActivity, uri) ?: "audio.mp3")
+                        }
+                        vm.queueBatchItems(files)
+                    }
+                }
+
                 var showAbout by rememberSaveable { mutableStateOf(false) }
                 if (showAbout) {
                     BackHandler { showAbout = false }
                     AboutScreen(onBack = { showAbout = false })
                 } else {
-                    ScribScreen(
+                    TranscriberScreen(
                         state = state,
                         onDownload = vm::download,
                         onCancel = vm::cancel,
@@ -68,9 +94,24 @@ class MainActivity : ComponentActivity() {
                         onBenchmarkFile = vm::benchmarkFile,
                         onCancelBenchmark = vm::cancelBenchmark,
                         onPickLanguage = vm::setupForLanguage,
-                        onSkipSilence = vm::setSkipSilence,
                         onLiveStats = vm::setLiveStats,
-                        onConfigureKeyboardLayouts = vm::setKeyboardLayouts,
+                        onParagraphWordThresholdChange = vm::setParagraphWordThreshold,
+                        onDiarizationSensitivityChange = vm::setDiarizationSensitivity,
+                        onExpectedSpeakersChange = vm::setExpectedSpeakers,
+                        onSelectAppTheme = vm::setAppTheme,
+                        onSelectDefaultFormat = vm::setDefaultExportFormat,
+                        onRenameSpeaker = vm::renameSpeaker,
+                        onRenameSpeakerInstance = vm::renameSpeakerInstance,
+                        onDeleteSpeakerLabel = vm::deleteSpeakerLabel,
+                        onInsertSpeakerLabel = vm::insertSpeakerLabel,
+                        onInsertSpeakerLabelAtTimestamp = vm::insertSpeakerLabelAtTimestamp,
+                        onReplaceTextInstance = vm::replaceTextInstance,
+                        onReplaceAllText = vm::replaceAllText,
+                        onUpdateTurnBlockText = vm::updateTurnBlockText,
+                        onToggleTimestamps = vm::toggleTimestamps,
+                        onToggleSpeakers = vm::toggleSpeakers,
+                        onColorizeSpeakerLabelsChange = vm::setColorizeSpeakerLabels,
+                        onToggleColorizeSpeakers = vm::toggleTranscriptColorizeSpeakers,
                         onImportSherpa = vm::importSherpa,
                         sherpaPlugin = SherpaPlugins.plugin,
                         endpointPlugin = EndpointPlugins.plugin,
@@ -87,8 +128,27 @@ class MainActivity : ComponentActivity() {
                         onTranscriptFormat = vm::setTranscriptFormat,
                         onSaveToHistory = vm::saveTranscriptToHistory,
                         onDeleteHistory = vm::deleteHistoryEntry,
-                        onSaveHistoryFile = vm::saveHistoryEntryToFile,
+                        onDeleteHistoryEntries = vm::deleteHistoryEntries,
+                        onRenameHistory = vm::renameHistoryEntry,
+                        onSaveHistoryFile = { _, uri, text, format, segments, showTimestamps, showSpeakers, colorizeSpeakerLabels, fileName ->
+                            vm.exportTranscriptFile(
+                                uri = uri,
+                                fileName = fileName,
+                                segments = segments,
+                                format = format,
+                                showTimestamps = showTimestamps,
+                                showSpeakers = showSpeakers,
+                                colorSpeakers = colorizeSpeakerLabels,
+                                fallbackText = text
+                            )
+                        },
+                        onUpdateHistoryEntry = vm::updateHistoryEntry,
+                        onUpdateHistoryColorize = vm::updateHistoryEntryColorize,
                         onTogglePinned = vm::togglePinned,
+                        batchState = BatchQueueManager.state.collectAsState().value,
+                        onPickBatchFiles = { batchPicker.launch(arrayOf("audio/*", "video/*", "application/ogg", "application/opus", "application/octet-stream")) },
+                        onStartBatch = vm::startBatchProcessing,
+                        onRemoveBatchItem = BatchQueueManager::removeItem,
                         benchmarkRuns = state.benchmarkRuns,
                         onAbout = { showAbout = true }
                     )
@@ -97,25 +157,10 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // The app is often already running when the voice keyboard sends the user here, and then the
-    // intent arrives without a fresh creation.
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        takeMicrophoneRequest(intent)
-    }
-
-    // Asked for here rather than where the intent arrives: a request made while the activity is
-    // still coming to the front is dropped without ever showing the dialog.
-    override fun onResume() {
-        super.onResume()
-        if (!pendingMicrophone) {
-            return
-        }
-        pendingMicrophone = false
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 0)
-        }
+        maybeTranscribeShared(intent)
     }
 
     // The platform hands a backgrounded app silence instead of the microphone, so a take that
@@ -143,20 +188,5 @@ class MainActivity : ComponentActivity() {
             return
         }
         sharedVm.transcribeFile(uri, queryDisplayName(this, uri))
-    }
-
-    // An input method has no activity of its own to ask from, so the voice keyboard sends the user
-    // here for the one permission it cannot do without. The extra is consumed on arrival, or a
-    // rotation would ask again.
-    private fun takeMicrophoneRequest(intent: Intent?) {
-        if (intent?.getBooleanExtra(EXTRA_REQUEST_MICROPHONE, false) != true) {
-            return
-        }
-        intent.removeExtra(EXTRA_REQUEST_MICROPHONE)
-        pendingMicrophone = true
-    }
-
-    companion object {
-        const val EXTRA_REQUEST_MICROPHONE = "org.scrib.transcriber.REQUEST_MICROPHONE"
     }
 }

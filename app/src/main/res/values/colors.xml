@@ -1,13 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- The app's scheme once more, for the input method: it is drawn with plain views, which cannot
-     reach the Compose theme the rest of the app is painted with. -->
+<!-- Broadcast Slate/Cyan theme resources for input method views. -->
 <resources>
-    <color name="ime_background">#EEF3F1</color>
+    <color name="ime_background">#F1F5F9</color>
     <color name="ime_surface">#FFFFFF</color>
-    <color name="ime_on_surface">#171D1C</color>
-    <color name="ime_on_surface_variant">#3F4A48</color>
-    <color name="ime_outline">#D3DEDC</color>
-    <color name="ime_primary">#006A6A</color>
+    <color name="ime_on_surface">#0F172A</color>
+    <color name="ime_on_surface_variant">#475569</color>
+    <color name="ime_outline">#CBD5E1</color>
+    <color name="ime_primary">#0284C7</color>
     <color name="ime_on_primary">#FFFFFF</color>
-    <color name="ime_alert">#BA1A1A</color>
+    <color name="ime_alert">#DC2626</color>
 </resources>

@@ -12,54 +12,60 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 
 private val LightScheme = lightColorScheme(
-    primary = Color(0xFF006A6A),
+    primary = Color(0xFF0284C7),
     onPrimary = Color(0xFFFFFFFF),
-    primaryContainer = Color(0xFFC7EAE8),
-    onPrimaryContainer = Color(0xFF00201F),
-    background = Color(0xFFF6F9F8),
-    onBackground = Color(0xFF171D1C),
+    primaryContainer = Color(0xFFE0F2FE),
+    onPrimaryContainer = Color(0xFF0369A1),
+    background = Color(0xFFF8FAFC),
+    onBackground = Color(0xFF0F172A),
     surface = Color(0xFFFFFFFF),
-    onSurface = Color(0xFF171D1C),
-    surfaceContainer = Color(0xFFEEF3F1),
-    onSurfaceVariant = Color(0xFF3F4A48),
-    outline = Color(0xFF6F7977),
-    outlineVariant = Color(0xFFD3DEDC),
-    error = Color(0xFFBA1A1A),
+    onSurface = Color(0xFF0F172A),
+    surfaceContainer = Color(0xFFF1F5F9),
+    onSurfaceVariant = Color(0xFF475569),
+    outline = Color(0xFF94A3B8),
+    outlineVariant = Color(0xFFCBD5E1),
+    error = Color(0xFFDC2626),
     onError = Color(0xFFFFFFFF),
-    errorContainer = Color(0xFFFFDAD6),
-    onErrorContainer = Color(0xFF410002)
+    errorContainer = Color(0xFFFEE2E2),
+    onErrorContainer = Color(0xFF991B1B)
 )
 
 private val DarkScheme = darkColorScheme(
-    primary = Color(0xFF4FD8DB),
-    onPrimary = Color(0xFF00373A),
-    primaryContainer = Color(0xFF00504F),
-    onPrimaryContainer = Color(0xFF7AF4F4),
-    background = Color(0xFF0E1413),
-    onBackground = Color(0xFFDEE4E2),
-    surface = Color(0xFF0E1413),
-    onSurface = Color(0xFFDEE4E2),
-    surfaceContainer = Color(0xFF1A2221),
-    onSurfaceVariant = Color(0xFFBEC9C6),
-    outline = Color(0xFF889492),
-    outlineVariant = Color(0xFF3F4A48),
-    error = Color(0xFFFFB4AB),
-    onError = Color(0xFF690005),
-    errorContainer = Color(0xFF93000A),
-    onErrorContainer = Color(0xFFFFDAD6)
+    primary = Color(0xFF38BDF8),
+    onPrimary = Color(0xFF081018),
+    primaryContainer = Color(0xFF0EA5E9),
+    onPrimaryContainer = Color(0xFFE0F2FE),
+    background = Color(0xFF121417),
+    onBackground = Color(0xFFF0F3F6),
+    surface = Color(0xFF181B20),
+    onSurface = Color(0xFFF0F3F6),
+    surfaceContainer = Color(0xFF1E222A),
+    onSurfaceVariant = Color(0xFF8B949E),
+    outline = Color(0xFF5C6570),
+    outlineVariant = Color(0xFF282C35),
+    error = Color(0xFFFF4D4F),
+    onError = Color(0xFF2C0001),
+    errorContainer = Color(0xFF7F1D1D),
+    onErrorContainer = Color(0xFFFECACA)
 )
 
 @Composable
-fun ScribTheme(
+fun TranscriberTheme(
+    themeMode: String = "system",
     dynamicColor: Boolean = false,
     content: @Composable () -> Unit
 ) {
-    val dark = isSystemInDarkTheme()
+    val systemDark = isSystemInDarkTheme()
+    val isDark = when (themeMode.lowercase()) {
+        "dark" -> true
+        "light" -> false
+        else -> systemDark
+    }
     val context = LocalContext.current
     val scheme = when {
         dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ->
-            if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-        dark -> DarkScheme
+            if (isDark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+        isDark -> DarkScheme
         else -> LightScheme
     }
     MaterialTheme(colorScheme = scheme, content = content)

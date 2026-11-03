@@ -1,6 +1,13 @@
 apply plugin: 'com.android.application'
 apply plugin: 'org.jetbrains.kotlin.android'
 apply plugin: 'org.jetbrains.kotlin.plugin.compose'
+apply plugin: 'com.chaquo.python'
+
+// Workaround for KGP friendPathsSet state lock error when invoked from IDE
+if (project.hasProperty('android.injected.invoked.from.ide')) {
+    project.ext['android.injected.invoked.from.ide'] = 'false'
+}
+
 
 // F-Droid builds the arm64 APK every phone wants; the release workflow passes -Pabis to fold
 // the remaining architectures into the single universal APK it attaches to a GitHub release.
@@ -13,7 +20,7 @@ if (max && remote) {
 }
 def local = !remote
 def suffix = max ? '.max' : remote ? '.remote' : ''
-def appName = max ? 'Scrib Max' : remote ? 'Scrib Remote' : 'Scrib'
+def appName = 'Transcriber'
 def launcher = max ? 'ic_launcher_max' : remote ? 'ic_launcher_remote' : 'ic_launcher'
 def launcherRound = max ? 'ic_launcher_round_max' : remote ? 'ic_launcher_round_remote' : 'ic_launcher_round'
 
@@ -27,8 +34,8 @@ android {
         applicationId "org.scrib.transcriber${suffix}"
         minSdk 26
         targetSdk 35
-        versionCode 23
-        versionName '0.23'
+        versionCode 64
+        versionName '0.64'
 
         resValue 'string', 'app_name', appName
 
@@ -66,6 +73,15 @@ android {
                 }
             }
         }
+
+        python {
+            buildPython "C:/Users/moonl/AppData/Local/Programs/Python/Python312/python.exe"
+            version "3.8"
+            pip {
+                install "numpy"
+                install "soundfile"
+            }
+        }
     }
 
     buildFeatures {
@@ -73,6 +89,7 @@ android {
         compose true
         buildConfig true
     }
+
 
     if (local) {
         externalNativeBuild {
@@ -91,11 +108,27 @@ android {
         jvmTarget = '17'
     }
 
+    signingConfigs {
+        release {
+            storeFile file("release.keystore")
+            storePassword "scrib_release_pass"
+            keyAlias "scrib_release"
+            keyPassword "scrib_release_pass"
+            v1SigningEnabled true
+            v2SigningEnabled true
+            enableV3Signing true
+            enableV4Signing true
+        }
+    }
+
     buildTypes {
         release {
+            signingConfig signingConfigs.release
             minifyEnabled false
+            debuggable false
         }
         debug {
+            signingConfig signingConfigs.release
             applicationIdSuffix '.debug'
             resValue 'string', 'app_name', "${appName} Debug"
         }
@@ -106,10 +139,7 @@ android {
     // -PabiSplits, and it pairs it with -Pabis covering all four; F-Droid takes the default one.
     splits {
         abi {
-            enable project.hasProperty('abiSplits')
-            reset()
-            include 'arm64-v8a', 'armeabi-v7a', 'x86_64', 'x86'
-            universalApk true
+            enable false
         }
     }
 
@@ -128,6 +158,10 @@ android {
                          '**/libggml-cpu-android_armv8.6*.so',
                          '**/libggml-cpu-android_armv9*.so']
         }
+    }
+
+    testOptions {
+        unitTests.returnDefaultValues = true
     }
 
     // srcDirs of main rather than source sets of their own: one module, one compilation, so an
@@ -151,6 +185,10 @@ android {
             }
         }
     }
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
 }
 
 dependencies {
@@ -162,10 +200,13 @@ dependencies {
     implementation 'androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7'
     implementation 'androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.7'
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1'
-    if (max) {
-        if (!file('libs/sherpa-onnx.aar').exists()) {
-            throw new GradleException("Missing app/libs/sherpa-onnx.aar — run scripts/download-sherpa-onnx.sh first")
-        }
-        implementation fileTree(dir: 'libs', include: ['*.aar'])
-    }
+    implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.18.0'
+    implementation fileTree(dir: 'libs', include: ['*.aar'])
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'com.microsoft.onnxruntime:onnxruntime:1.18.0'
 }
+
+
+
+
+

@@ -10,6 +10,7 @@ endif ()
 
 add_library(scrib_transcribe SHARED
     "${CMAKE_CURRENT_LIST_DIR}/transcribe_jni.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/native_diarize.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/silero_vad.cpp")
 
 target_compile_features(scrib_transcribe PRIVATE cxx_std_17)

@@ -1,2 +1,25 @@
+plugins {
+    id 'org.gradle.toolchains.foojay-resolver-convention' version '0.10.0'
+}
+
+// Automatically clear ANDROID_PREFS_ROOT from ProcessEnvironment so AGP never fails when tools/IDE inject it
+try {
+    Class<?> pe = Class.forName("java.lang.ProcessEnvironment")
+    def field = pe.getDeclaredField("theEnvironment")
+    field.setAccessible(true)
+    ((Map) field.get(null)).remove("ANDROID_PREFS_ROOT")
+
+    def ciField = pe.getDeclaredField("theCaseInsensitiveEnvironment")
+    ciField.setAccessible(true)
+    ((Map) ciField.get(null)).remove("ANDROID_PREFS_ROOT")
+} catch (Throwable ignored) {}
+
 include ':app'
-rootProject.name = "Scrib"
+rootProject.name = "Transcriber"
+
+
+
+
+
+
+

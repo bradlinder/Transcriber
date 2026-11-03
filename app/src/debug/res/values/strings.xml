@@ -1,4 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="ime_label">Scrib Voice Debug</string>
+    <string name="ime_label">Transcriber Voice Debug</string>
 </resources>

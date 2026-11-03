@@ -8,3 +8,7 @@ captures/
 .cxx/
 .claude/
 app/libs/*.aar
+*.keystore
+*.jks
+
+*.zip

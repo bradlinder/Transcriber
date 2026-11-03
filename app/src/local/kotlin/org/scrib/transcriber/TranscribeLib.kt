@@ -21,6 +21,8 @@ class TranscribeModelInfo(
 }
 
 class TranscribeSegmentData(val startMs: Long, val endMs: Long, val text: String)
+class TranscribeTokenData(val startMs: Long, val endMs: Long, val text: String)
+
 
 class TranscribeAbort internal constructor(internal var ptr: Long) {
 
@@ -222,6 +224,22 @@ class TranscribeSession internal constructor(private var ptr: Long, private val 
         return segments
     }
 
+    fun tokens(): List<TranscribeTokenData> {
+        val count = TranscribeLib.nativeTokenCount(ptr)
+        if (count <= 0) {
+            return emptyList()
+        }
+        val bounds = TranscribeLib.nativeTokenBounds(ptr)
+        val tokens = ArrayList<TranscribeTokenData>(count)
+        for (i in 0 until count) {
+            val text = TranscribeLib.nativeTokenText(ptr, i)?.takeIf { it.isNotBlank() } ?: continue
+            val t0 = if (i * 2 + 1 < bounds.size) bounds[i * 2] else 0L
+            val t1 = if (i * 2 + 1 < bounds.size) bounds[i * 2 + 1] else 0L
+            tokens.add(TranscribeTokenData(t0, t1, text))
+        }
+        return tokens
+    }
+
     fun streamBegin(language: String?, prompt: String?, translate: Boolean, abort: TranscribeAbort?) {
         require(ptr != 0L)
         val status = TranscribeLib.nativeStreamBegin(
@@ -294,6 +312,15 @@ private class TranscribeLib {
             speechPadMs: Int
         ): LongArray
 
+        external fun nativeDiarizeSpans(
+            vadPtr: Long,
+            buffer: ByteBuffer,
+            sampleCount: Int,
+            threshold: Float,
+            minSpeechMs: Int,
+            minSilenceMs: Int
+        ): Array<String>?
+
         external fun nativeModelLoad(path: String): Long
         external fun nativeModelFree(modelPtr: Long)
         external fun nativeModelArch(modelPtr: Long): String?
@@ -322,7 +349,11 @@ private class TranscribeLib {
         external fun nativeSegmentCount(sessionPtr: Long): Int
         external fun nativeSegmentText(sessionPtr: Long, index: Int): String?
         external fun nativeSegmentBounds(sessionPtr: Long, fromIndex: Int): LongArray
+        external fun nativeTokenCount(sessionPtr: Long): Int
+        external fun nativeTokenText(sessionPtr: Long, index: Int): String?
+        external fun nativeTokenBounds(sessionPtr: Long): LongArray
         external fun nativeWasAborted(sessionPtr: Long): Boolean
+
 
         external fun nativeStreamBegin(
             sessionPtr: Long,

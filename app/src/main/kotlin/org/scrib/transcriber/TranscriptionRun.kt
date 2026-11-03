@@ -77,13 +77,19 @@ object TranscriptionRun {
         }
         val modelName = ModelManager.activeDisplayName(app)
         if (persistTranscript) TranscriptStore.clear(app)
+        val wordThreshold = ModelManager.paragraphWordThreshold(app)
+        val defaultFormat = TranscriptFormat.fromString(ModelManager.defaultExportFormat(app))
+        val colorizeSpeakers = ModelManager.colorizeSpeakerLabels(app)
         _state.value = TranscribeUi(
             fileName = name,
             text = "",
             running = true,
             error = null,
             sourceUri = source,
-            modelName = modelName
+            modelName = modelName,
+            wordThreshold = wordThreshold,
+            format = defaultFormat,
+            colorizeSpeakerLabels = colorizeSpeakers
         )
         TranscriptionForegroundService.start(app)
         scope.launch {
@@ -145,17 +151,32 @@ object TranscriptionRun {
                 null
             }
             var result = TranscriptionRunResult.FAILED
+            var decodedAudio: DecodedAudio? = null
             try {
-                val pfd = app.contentResolver.openFileDescriptor(uri, "r")
-                    ?: throw RuntimeException(app.getString(R.string.transcribe_cant_open))
-                val segments = TranscriptionEngine.get(app).transcribeToSegments(
-                    pfd, "", cancellation,
-                    // Percent and ETA are cheap state writes. The figures are not re-read here: the
-                    // ticker above already republishes them twice a second, and sampling the process
-                    // once per progress tick doubles that cost for nothing a person can see.
+                val decodeStartedAt = SystemClock.elapsedRealtime()
+                val audio = try {
+                    val pfd = app.contentResolver.openFileDescriptor(uri, "r")
+                        ?: throw RuntimeException(app.getString(R.string.transcribe_cant_open))
+                    try {
+                        AudioDecoder.decodeToPcm16kMono(pfd, cancellation, app.cacheDir).also { decodedAudio = it }
+                    } finally {
+                        try { pfd.close() } catch (_: Throwable) {}
+                    }
+                } catch (e: CancelledException) {
+                    throw e
+                } catch (e: LowStorageException) {
+                    throw e
+                } catch (e: Throwable) {
+                    throw DecodeException(e.message ?: "Cannot decode audio")
+                }
+                val localDecodeMs = SystemClock.elapsedRealtime() - decodeStartedAt
+
+                val rawSegments = TranscriptionEngine.get(app).transcribeDecodedToSegments(
+                    audio, "", cancellation,
                     onProgress = { pct ->
-                        val left = eta.mark(pct)
-                        _state.update { it?.copy(percent = pct, etaMs = left) }
+                        val scaledPct = (pct * 0.65f).toInt()
+                        val left = eta.mark(scaledPct)
+                        _state.update { it?.copy(percent = scaledPct, etaMs = left) }
                     },
                     onPartial = { partial -> _state.update { it?.copy(text = partial) } },
                     onMetrics = { metrics ->
@@ -166,8 +187,8 @@ object TranscriptionRun {
                                     inferenceStartedAt = SystemClock.elapsedRealtime()
                                 }
                             }
-                            if (metrics.decodeMs > 0L) {
-                                decodeMs = metrics.decodeMs
+                            if (localDecodeMs > 0L) {
+                                decodeMs = localDecodeMs
                             }
                             if (metrics.inferenceMs > 0L) {
                                 inferenceMs = metrics.inferenceMs
@@ -184,7 +205,23 @@ object TranscriptionRun {
                         }
                     }
                 )
-                val text = segments.format(TranscriptFormat.TXT)
+
+                val rawDiarized = try {
+                    val targetAudio = audio
+                    DiarizationEngine.diarize(app, targetAudio, 16000, rawSegments) { prog ->
+                        val scaledPct = (prog * 100).toInt().coerceIn(65, 95)
+                        val left = eta.mark(scaledPct)
+                        _state.update { it?.copy(percent = scaledPct, etaMs = left) }
+                    }
+                } catch (e: Throwable) {
+                    android.util.Log.e("TranscriptionRun", "Diarization error: ${e.message}", e)
+                    rawSegments
+                }
+
+                // Clean standard ASR silence hallucinations and degenerate repeating n-gram loops (desktop transcript_cleaner port)
+                val segments = rawDiarized.scrubTranscript()
+
+                val text = segments.format(TranscriptFormat.TXT, wordThreshold)
                 if (cancellation.isCancelled) {
                     _state.value = null
                     result = TranscriptionRunResult.CANCELLED
@@ -233,6 +270,7 @@ object TranscriptionRun {
                     publishMetrics()
                 }
             } finally {
+                try { decodedAudio?.close() } catch (_: Throwable) {}
                 metricsJob?.cancelAndJoin()
                 synchronized(this@TranscriptionRun) {
                     if (token === cancellation) token = null
@@ -248,6 +286,110 @@ object TranscriptionRun {
             return
         }
         TranscriptStore.load(context.applicationContext)?.let { _state.value = it }
+    }
+
+    fun renameSpeaker(oldName: String, newName: String) {
+        _state.update { current ->
+            if (current == null) return@update null
+            val updatedSegments = current.segments.renameSpeaker(oldName, newName)
+            val updatedText = updatedSegments.format(current.format, current.wordThreshold, current.showTimestamps, current.showSpeakers)
+            current.copy(text = updatedText, segments = updatedSegments)
+        }
+    }
+
+    fun renameSpeakerInstance(segmentIndex: Int, newName: String) {
+        _state.update { current ->
+            if (current == null) return@update null
+            val updatedSegments = current.segments.renameSpeakerInstance(segmentIndex, newName)
+            val updatedText = updatedSegments.format(current.format, current.wordThreshold, current.showTimestamps, current.showSpeakers)
+            current.copy(text = updatedText, segments = updatedSegments)
+        }
+    }
+
+    fun deleteSpeakerLabel(segmentIndex: Int) {
+        _state.update { current ->
+            if (current == null) return@update null
+            val updatedSegments = current.segments.deleteSpeakerLabel(segmentIndex)
+            val updatedText = updatedSegments.format(current.format, current.wordThreshold, current.showTimestamps, current.showSpeakers)
+            current.copy(text = updatedText, segments = updatedSegments)
+        }
+    }
+
+    fun insertSpeakerLabel(segmentIndex: Int, newSpeakerName: String) {
+        _state.update { current ->
+            if (current == null) return@update null
+            val updatedSegments = current.segments.insertSpeakerLabel(segmentIndex, newSpeakerName)
+            val updatedText = updatedSegments.format(current.format, current.wordThreshold, current.showTimestamps, current.showSpeakers)
+            current.copy(text = updatedText, segments = updatedSegments)
+        }
+    }
+
+    fun insertSpeakerLabelAtTimestamp(timestampMs: Long, newSpeakerName: String) {
+        _state.update { current ->
+            if (current == null) return@update null
+            val updatedSegments = current.segments.insertSpeakerLabelAtTimestamp(timestampMs, newSpeakerName)
+            val updatedText = updatedSegments.format(current.format, current.wordThreshold, current.showTimestamps, current.showSpeakers)
+            current.copy(text = updatedText, segments = updatedSegments)
+        }
+    }
+
+    fun replaceTextInstance(matchIndex: Int, findText: String, replaceText: String) {
+        _state.update { current ->
+            if (current == null) return@update null
+            val updatedSegments = current.segments.replaceTextInstance(matchIndex, findText, replaceText)
+            val updatedText = updatedSegments.format(current.format, current.wordThreshold, current.showTimestamps, current.showSpeakers)
+            current.copy(text = updatedText, segments = updatedSegments)
+        }
+    }
+
+    fun replaceAllText(findText: String, replaceText: String) {
+        _state.update { current ->
+            if (current == null) return@update null
+            val updatedSegments = current.segments.replaceAllText(findText, replaceText)
+            val updatedText = updatedSegments.format(current.format, current.wordThreshold, current.showTimestamps, current.showSpeakers)
+            current.copy(text = updatedText, segments = updatedSegments)
+        }
+    }
+
+    fun updateTurnBlockText(segmentIndex: Int, oldText: String, newText: String) {
+        _state.update { current ->
+            if (current == null) return@update null
+            val updatedSegments = current.segments.updateTurnBlockText(segmentIndex, oldText, newText)
+            val updatedText = updatedSegments.format(current.format, current.wordThreshold, current.showTimestamps, current.showSpeakers)
+            current.copy(text = updatedText, segments = updatedSegments)
+        }
+    }
+
+    fun setSegments(segments: List<TranscriptSegment>) {
+        _state.update { current ->
+            if (current == null) return@update null
+            val updatedText = segments.format(current.format, current.wordThreshold, current.showTimestamps, current.showSpeakers)
+            current.copy(text = updatedText, segments = segments)
+        }
+    }
+
+    fun toggleTimestamps(enabled: Boolean) {
+        _state.update { current ->
+            current?.copy(showTimestamps = enabled)
+        }
+    }
+
+    fun toggleSpeakers(enabled: Boolean) {
+        _state.update { current ->
+            current?.copy(showSpeakers = enabled)
+        }
+    }
+
+    fun toggleColorizeSpeakers(enabled: Boolean) {
+        _state.update { current ->
+            current?.copy(colorizeSpeakerLabels = enabled)
+        }
+    }
+
+    fun setFormat(format: TranscriptFormat) {
+        _state.update { current ->
+            current?.copy(format = format)
+        }
     }
 
     fun cancel(context: Context) {
@@ -270,8 +412,8 @@ object TranscriptionRun {
         _state.value = null
     }
 
-    fun setFormat(format: TranscriptFormat) {
-        _state.update { it?.copy(format = format) }
+    fun setWordThreshold(wordThreshold: Int) {
+        _state.update { it?.copy(wordThreshold = wordThreshold) }
     }
 }
 

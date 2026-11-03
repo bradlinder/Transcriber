@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="endpoint_header">REMOTE ENDPOINT</string>
-    <string name="endpoint_not_configured">No endpoint set. Point Scrib at an OpenAI-compatible server you control — audio you send there leaves the phone.</string>
+    <string name="endpoint_not_configured">No endpoint set. Point Transcriber at an OpenAI-compatible server you control — audio you send there leaves the phone.</string>
     <string name="endpoint_setup">Set up endpoint</string>
     <string name="endpoint_active">ACTIVE</string>
     <string name="endpoint_model_line">model: %1$s</string>
@@ -20,7 +20,7 @@
     <string name="endpoint_account_hint">The 32-character id from the Cloudflare dashboard</string>
     <string name="endpoint_token">API token</string>
     <string name="endpoint_name">Name, optional</string>
-    <string name="endpoint_name_hint">Shown on the model card and in the voice keyboard. Leave empty to use the domain.</string>
+    <string name="endpoint_name_hint">Shown on the model card. Leave empty to use the domain.</string>
     <string name="endpoint_model">Model</string>
     <string name="endpoint_fetch">Fetch models</string>
     <string name="endpoint_test">Test</string>

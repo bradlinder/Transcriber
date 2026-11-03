@@ -69,6 +69,65 @@ class GgmlTranscriptionEngine(private val appContext: Context) : TranscriptionEn
             }
         }
 
+    override fun transcribeDecodedToSegments(
+        pcm: DecodedAudio,
+        languageHint: String?,
+        cancellation: CancellationToken,
+        onProgress: (Int) -> Unit,
+        onPartial: (String) -> Unit,
+        onMetrics: (TranscriptionMetrics) -> Unit
+    ): List<TranscriptSegment> {
+        if (cancellation.isCancelled) {
+            throw CancelledException()
+        }
+        if (pcm.sampleCount == 0) {
+            throw DecodeException("No audio decoded")
+        }
+        val audioDurationMs = pcm.sampleCount.toLong() * 1000L / SAMPLE_RATE
+        onMetrics(TranscriptionMetrics(audioDurationMs = audioDurationMs))
+        var modelLoadMs = 0L
+        var modelPssMb = 0
+        var modelMemoryDeltaMb = 0
+        val inferenceStartedAt = SystemClock.elapsedRealtime()
+        fun reportProgress(percent: Int) {
+            onProgress(percent)
+            onMetrics(
+                TranscriptionMetrics(
+                    audioDurationMs = audioDurationMs,
+                    inferenceMs = SystemClock.elapsedRealtime() - inferenceStartedAt,
+                    modelLoadMs = modelLoadMs,
+                    modelPssMb = modelPssMb,
+                    modelMemoryDeltaMb = modelMemoryDeltaMb
+                )
+            )
+        }
+        return try {
+            transcribePcm(
+                pcm,
+                languageHint,
+                cancellation,
+                ::reportProgress,
+                onPartial,
+                onModelLoad = { metrics ->
+                    modelLoadMs = metrics.modelLoadMs
+                    modelPssMb = metrics.modelPssMb
+                    modelMemoryDeltaMb = metrics.modelMemoryDeltaMb
+                    onMetrics(metrics)
+                }
+            )
+        } finally {
+            onMetrics(
+                TranscriptionMetrics(
+                    audioDurationMs = audioDurationMs,
+                    inferenceMs = SystemClock.elapsedRealtime() - inferenceStartedAt,
+                    modelLoadMs = modelLoadMs,
+                    modelPssMb = modelPssMb,
+                    modelMemoryDeltaMb = modelMemoryDeltaMb
+                )
+            )
+        }
+    }
+
     override fun transcribeToSegments(
         audio: ParcelFileDescriptor,
         languageHint: String?,
@@ -84,57 +143,8 @@ class GgmlTranscriptionEngine(private val appContext: Context) : TranscriptionEn
             val decodeStartedAt = SystemClock.elapsedRealtime()
             val pcm = AudioDecoder.decodeToPcm16kMono(audio, cancellation)
             val decodeMs = SystemClock.elapsedRealtime() - decodeStartedAt
-            if (cancellation.isCancelled) {
-                throw CancelledException()
-            }
-            if (pcm.sampleCount == 0) {
-                throw DecodeException("No audio decoded")
-            }
-            val audioDurationMs = pcm.sampleCount.toLong() * 1000L / SAMPLE_RATE
-            onMetrics(TranscriptionMetrics(audioDurationMs = audioDurationMs, decodeMs = decodeMs))
-            var modelLoadMs = 0L
-            var modelPssMb = 0
-            var modelMemoryDeltaMb = 0
-            val inferenceStartedAt = SystemClock.elapsedRealtime()
-            fun reportProgress(percent: Int) {
-                onProgress(percent)
-                onMetrics(
-                    TranscriptionMetrics(
-                        audioDurationMs = audioDurationMs,
-                        decodeMs = decodeMs,
-                        inferenceMs = SystemClock.elapsedRealtime() - inferenceStartedAt,
-                        modelLoadMs = modelLoadMs,
-                        modelPssMb = modelPssMb,
-                        modelMemoryDeltaMb = modelMemoryDeltaMb
-                    )
-                )
-            }
-            return try {
-                transcribePcm(
-                    pcm,
-                    languageHint,
-                    cancellation,
-                    ::reportProgress,
-                    onPartial,
-                    onModelLoad = { metrics ->
-                        modelLoadMs = metrics.modelLoadMs
-                        modelPssMb = metrics.modelPssMb
-                        modelMemoryDeltaMb = metrics.modelMemoryDeltaMb
-                        onMetrics(metrics)
-                    }
-                )
-            } finally {
-                onMetrics(
-                    TranscriptionMetrics(
-                        audioDurationMs = audioDurationMs,
-                        decodeMs = decodeMs,
-                        inferenceMs = SystemClock.elapsedRealtime() - inferenceStartedAt,
-                        modelLoadMs = modelLoadMs,
-                        modelPssMb = modelPssMb,
-                        modelMemoryDeltaMb = modelMemoryDeltaMb
-                    )
-                )
-            }
+            onMetrics(TranscriptionMetrics(decodeMs = decodeMs))
+            return transcribeDecodedToSegments(pcm, languageHint, cancellation, onProgress, onPartial, onMetrics)
         } finally {
             try {
                 audio.close()
@@ -185,8 +195,9 @@ class GgmlTranscriptionEngine(private val appContext: Context) : TranscriptionEn
                 throw CancelledException()
             }
             onProgress(100)
+            val rawTokens = live.tokens()
             return markParagraphs(
-                audio.segmentsOf(result, 0, audio.sampleCount) { text ->
+                audio.segmentsOf(result, 0, audio.sampleCount, rawTokens) { text ->
                     Dictionary.applyReplacements(appContext, text)
                 },
                 emptyList()
@@ -230,7 +241,8 @@ class GgmlTranscriptionEngine(private val appContext: Context) : TranscriptionEn
             if (cancellation.isCancelled) {
                 throw CancelledException()
             }
-            for (segment in audio.segmentsOf(result, offset, length) { text ->
+            val rawTokens = live.tokens()
+            for (segment in audio.segmentsOf(result, offset, length, rawTokens) { text ->
                 Dictionary.applyReplacements(appContext, text)
             }) {
                 segments.add(if (segments.isEmpty()) segment else segment.copy(text = " ${segment.text}"))
@@ -368,26 +380,90 @@ class GgmlTranscriptionEngine(private val appContext: Context) : TranscriptionEn
             return view.slice().order(ByteOrder.nativeOrder())
         }
 
+        private fun assembleBpeTokensToWords(
+            tokens: List<TranscribeTokenData>,
+            offsetMs: Long,
+            replace: (String) -> String
+        ): List<AcousticAligner.TimedWord> {
+            if (tokens.isEmpty()) return emptyList()
+
+            val words = mutableListOf<AcousticAligner.TimedWord>()
+            val currentWord = StringBuilder()
+            var wordStartMs = -1L
+            var wordEndMs = -1L
+
+            for (tok in tokens) {
+                val rawText = tok.text
+                if (rawText.isBlank()) continue
+
+                // BPE / SentencePiece tokens that start new words begin with space, SentencePiece indicator (\u2581), or newline
+                val startsNewWord = rawText.startsWith(" ") || rawText.startsWith("\u2581") || rawText.startsWith("\n") || currentWord.isEmpty()
+
+                if (startsNewWord && currentWord.isNotEmpty()) {
+                    val fullWord = replace(currentWord.toString()).trim()
+                    if (fullWord.isNotEmpty()) {
+                        words.add(AcousticAligner.TimedWord(fullWord, originalMsAt(wordStartMs), originalMsAt(wordEndMs)))
+                    }
+                    currentWord.clear()
+                    wordStartMs = -1L
+                }
+
+                val cleanTok = rawText.removePrefix("\u2581").trimStart()
+                val tokStart = offsetMs + tok.startMs
+                val tokEnd = offsetMs + tok.endMs
+
+                if (wordStartMs < 0L) {
+                    wordStartMs = tokStart
+                }
+                wordEndMs = tokEnd
+                currentWord.append(cleanTok)
+            }
+
+            if (currentWord.isNotEmpty()) {
+                val fullWord = replace(currentWord.toString()).trim()
+                if (fullWord.isNotEmpty()) {
+                    words.add(AcousticAligner.TimedWord(fullWord, originalMsAt(wordStartMs), originalMsAt(wordEndMs)))
+                }
+            }
+
+            return words
+        }
+
         fun segmentsOf(
             result: RunResult,
             offset: Int,
             length: Int,
+            tokens: List<TranscribeTokenData> = emptyList(),
             replace: (String) -> String
         ): List<TranscriptSegment> {
             if (result.text.isBlank()) {
                 return emptyList()
             }
+            val offsetMs = offset * 1000L / SAMPLE_RATE
+            val timedWords = assembleBpeTokensToWords(tokens, offsetMs, replace)
+
             val segments = result.segments.filter { it.text.isNotBlank() }
             if (segments.isEmpty()) {
-                return listOf(TranscriptSegment(originalMs(offset), originalMs(offset + length), replace(result.text)))
+                return listOf(
+                    TranscriptSegment(
+                        originalMs(offset),
+                        originalMs(offset + length),
+                        replace(result.text),
+                        words = timedWords
+                    )
+                )
             }
             return segments.map { segment ->
-                val from = (offset * 1000L / SAMPLE_RATE) + segment.startMs
-                val to = (offset * 1000L / SAMPLE_RATE) + segment.endMs
+                val from = offsetMs + segment.startMs
+                val to = offsetMs + segment.endMs
+                val segStart = originalMsAt(from)
+                val segEnd = originalMsAt(to)
+                val segWords = timedWords.filter { w -> w.startMs >= segStart - 100L && w.endMs <= segEnd + 100L }
                 TranscriptSegment(
-                    originalMsAt(from),
-                    originalMsAt(to),
-                    replace(segment.text)
+                    segStart,
+                    segEnd,
+                    replace(segment.text),
+                    words = segWords
                 )
             }
         }
