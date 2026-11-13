@@ -627,7 +627,7 @@ class GgmlTranscriptionEngine(private val appContext: Context) : TranscriptionEn
         const val SAMPLE_RATE = 16000
 
         const val WINDOW_SAMPLES = SAMPLE_RATE * 30
-        const val MIN_WINDOW_SAMPLES = SAMPLE_RATE * 24
+        const val MIN_WINDOW_SAMPLES = SAMPLE_RATE * 18
         const val CONTEXT_PROMPT_MAX_CHARS = 220
     }
 }

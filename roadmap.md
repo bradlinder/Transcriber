@@ -5,7 +5,7 @@ Transcriber is an offline-first, privacy-focused Android application designed fo
 
 ---
 
-## 2. Near-Term Feature Set & Current Version (`v0.72`)
+## 2. Near-Term Feature Set & Current Version (`v0.73`)
 - **Native C++ Engine:** Powered by Scrib's C++ `transcribe.cpp` / `whisper.cpp` / `ggml` runtime.
 - **Sentence-Boundary Paragraph Breaking:** Automatically breaks paragraphs at sentence-ending punctuation (`.?!`) when the configurable word threshold is reached (default 70 words, adjustable from 20 to 200 words in Settings).
 - **Intelligent Sentence Fragment Merger:** Automatically attaches short, lowercase sentence fragments ($\le 2$ words, e.g. `"examples."`) to parent sentences before paragraph breaks.
@@ -349,6 +349,12 @@ Transcriber is an offline-first, privacy-focused Android application designed fo
 - **Overview:**
   - Resolved the `org.scrib.transcriber.WordTiming` top-level Kotlin redeclaration between `Transcript.kt` and `CloudflareTransport.kt` that surfaced when building `-PwithSherpa` (`max`) or `-PwithRemote` (`remote`).
   - Renamed endpoint transport DTOs to `EndpointWordTiming` and `EndpointTranscript` across `CloudflareTransport.kt`, `OpenAiTransport.kt`, and `EndpointTranscriptionEngine.kt`.
+
+### [x] Priority 53 (COMPLETED in v0.73): Max APK Native Library Collision Fix (`libonnxruntime.so`) & Sustained Window-Boundary Pause Alignment
+- **Overview:**
+  - Resolved the `:app:mergeReleaseNativeLibs` duplicate `lib/arm64-v8a/libonnxruntime.so` packaging error in `Build max APK` (`-PwithSherpa`) by adding `pickFirsts += ['**/libonnxruntime.so']` to `packaging.jniLibs` and scoping `libs/*.aar` to `if (max)` in `app/build.gradle`.
+  - Replaced single-frame midpoint-biased pause snapping in `planPauseSnappedWindowRanges` with `AcousticAligner.findSustainedAcousticPause` (250ms rolling STE mean across `[18s, 30s]` with zero midpoint pull), preventing brief 20–40ms stop-consonant closures from triggering mid-clause window cuts.
+  - Synchronized `TimedWord` punctuation stripping and abutting boundary word deduplication in `Transcript.kt` (`toSentencesInternal`) so window-boundary false periods (`"police. thirty"`) are stripped from `TimedSentence.words` as well as `TimedSentence.text` and never resurrected during diarization reconstruction.
 
 ---
 

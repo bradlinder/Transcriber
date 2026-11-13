@@ -34,8 +34,8 @@ android {
         applicationId "org.scrib.transcriber${suffix}"
         minSdk 26
         targetSdk 35
-        versionCode 72
-        versionName '0.72'
+        versionCode 73
+        versionName '0.73'
 
         resValue 'string', 'app_name', appName
 
@@ -160,8 +160,11 @@ android {
     // are worth a megabyte of apk each. The rest need instructions no phone sells with (SME), or
     // measured slower than the plain build on real hardware -- the SVE kernels are written for
     // server cores and run at about half the speed on a phone.
+    // sherpa-onnx.aar and onnxruntime-android both bundle libonnxruntime.so; pickFirsts keeps the
+    // first one on the classpath (libs/sherpa-onnx.aar in max builds) so mergeReleaseNativeLibs succeeds.
     packaging {
         jniLibs {
+            pickFirsts += ['**/libonnxruntime.so']
             excludes += ['**/libggml-cpu-android_armv8.2_1.so',
                          '**/libggml-cpu-android_armv8.6*.so',
                          '**/libggml-cpu-android_armv9*.so']
@@ -208,8 +211,13 @@ dependencies {
     implementation 'androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7'
     implementation 'androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.7'
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1'
+    if (max) {
+        if (!file('libs/sherpa-onnx.aar').exists()) {
+            throw new GradleException("Missing app/libs/sherpa-onnx.aar — run scripts/download-sherpa-onnx.sh first")
+        }
+        implementation fileTree(dir: 'libs', include: ['*.aar'])
+    }
     implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.18.0'
-    implementation fileTree(dir: 'libs', include: ['*.aar'])
     testImplementation 'junit:junit:4.13.2'
     testImplementation 'com.microsoft.onnxruntime:onnxruntime:1.18.0'
 }

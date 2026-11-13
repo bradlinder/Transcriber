@@ -965,4 +965,43 @@ class DiarizationEngineTest {
         )
         assertArrayEquals(labels, explicitPreserved)
     }
+
+    @Test
+    fun testPlanPauseSnappedWindowRangesIgnoresStopConsonantDipForGenuinePause() {
+        val sampleRate = 16000
+        val totalSeconds = 40
+        val samples = FloatArray(totalSeconds * sampleRate) { i ->
+            (kotlin.math.sin(2.0 * Math.PI * 240.0 * i / sampleRate) * 0.50).toFloat()
+        }
+
+        // 1. Place a brief 25ms stop-consonant closure right at 24.0s (midpoint of 18s..30s)
+        val stopClosureStart = (24.000 * sampleRate).toInt()
+        val stopClosureEnd = (24.025 * sampleRate).toInt()
+        for (i in stopClosureStart until stopClosureEnd) {
+            samples[i] = 0.0f
+        }
+
+        // 2. Place a real 320ms inter-sentence breath pause near the edge of the search range at 19.20s - 19.52s
+        val breathPauseStart = (19.200 * sampleRate).toInt()
+        val breathPauseEnd = (19.520 * sampleRate).toInt()
+        for (i in breathPauseStart until breathPauseEnd) {
+            samples[i] = 0.0f
+        }
+
+        val energy = AcousticAligner.computeEnergyProfile(samples, sampleRate)
+        val ranges = AcousticAligner.planPauseSnappedWindowRanges(
+            totalSamples = samples.size,
+            maxWindowSamples = 30 * sampleRate,
+            minWindowSamples = 18 * sampleRate,
+            energy = energy,
+            sampleRate = sampleRate
+        )
+
+        assertEquals(2, ranges.size)
+        val cutSample = ranges[0].second
+        assertTrue(
+            "Sustained pause planner must cut inside the real 320ms breath pause (19.20s-19.52s) rather than the 25ms stop consonant at 24.0s (got ${cutSample.toDouble() / sampleRate}s)",
+            cutSample in (19.15 * sampleRate).toInt()..(19.57 * sampleRate).toInt()
+        )
+    }
 }

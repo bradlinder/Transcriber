@@ -553,15 +553,50 @@ private fun List<TranscriptSegment>.toSentencesInternal(
             val shouldMerge = sameSpeaker && last != null && (!lastEndsWithPunct || startsWithLower)
 
             if (shouldMerge) {
-                val cleanLast = if (startsWithLower && lastEndsWithPunct) {
+                val stripTerminalPunct = startsWithLower && lastEndsWithPunct
+                val cleanLast = if (stripTerminalPunct) {
                     lastText.trimEnd('.', '?', '!', ',', ';', ':', '"', '\'')
                 } else {
                     lastText
                 }
-                sentences[lastIdx] = last!!.copy(
+                val updatedLastWords = if (stripTerminalPunct && last!!.words.isNotEmpty()) {
+                    val lastWordIdx = last.words.lastIndex
+                    val prevWord = last.words[lastWordIdx]
+                    val strippedWord = prevWord.word.trimEnd('.', '?', '!', ',', ';', ':', '"', '\'')
+                    if (strippedWord.isNotEmpty() && strippedWord != prevWord.word) {
+                        last.words.toMutableList().apply {
+                            this[lastWordIdx] = prevWord.copy(word = strippedWord)
+                        }
+                    } else {
+                        last.words
+                    }
+                } else {
+                    last!!.words
+                }
+
+                // If a window boundary cut straddled a single word so the last token of window N
+                // and first token of window N+1 are the identical word within 400ms, drop the duplicate lead token.
+                val boundaryNormLast = updatedLastWords.lastOrNull()?.word
+                    ?.trim('.', '?', '!', ',', ';', ':', '"', '\'')
+                    ?.lowercase(Locale.ROOT)
+                val boundaryNormFirst = s.words.firstOrNull()?.word
+                    ?.trim('.', '?', '!', ',', ';', ':', '"', '\'')
+                    ?.lowercase(Locale.ROOT)
+                val isAbuttingDuplicateWord = !boundaryNormLast.isNullOrEmpty() &&
+                    boundaryNormLast == boundaryNormFirst &&
+                    (s.words.first().startMs - updatedLastWords.last().endMs) <= 400L
+
+                val mergedRightWords = if (isAbuttingDuplicateWord) s.words.drop(1) else s.words
+                val mergedRightText = if (isAbuttingDuplicateWord) {
+                    sTrimmed.split(Regex("""\s+"""), limit = 2).getOrNull(1)?.trim().orEmpty()
+                } else {
+                    sTrimmed
+                }
+
+                sentences[lastIdx] = last.copy(
                     endMs = maxOf(last.endMs, s.endMs),
-                    text = "$cleanLast $sTrimmed".trim(),
-                    words = last.words + s.words
+                    text = if (mergedRightText.isNotEmpty()) "$cleanLast $mergedRightText".trim() else cleanLast,
+                    words = updatedLastWords + mergedRightWords
                 )
             } else {
                 sentences.add(s)

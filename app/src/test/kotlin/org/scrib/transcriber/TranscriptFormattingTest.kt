@@ -63,4 +63,80 @@ class TranscriptFormattingTest {
         assertEquals("Must remain in 1 paragraph until natural sentence completion", 1, paragraphs.size)
         assertTrue("Paragraph must contain full text", paragraphs[0].contains("word75 This sentence finally finishes the thought."))
     }
+
+    @Test
+    fun testWindowBoundaryMergeStripsFalsePeriodFromTimedWordsAndDeduplicatesStraddledWord() {
+        val seg1Words = listOf(
+            AcousticAligner.TimedWord("Not", 51360L, 51600L),
+            AcousticAligner.TimedWord("interviewed", 51600L, 52100L),
+            AcousticAligner.TimedWord("by", 52100L, 52300L),
+            AcousticAligner.TimedWord("police.", 52300L, 54620L)
+        )
+        val seg2Words = listOf(
+            AcousticAligner.TimedWord("thirty", 54620L, 55000L),
+            AcousticAligner.TimedWord("years", 55000L, 55400L),
+            AcousticAligner.TimedWord("ago.", 55400L, 55900L)
+        )
+
+        val segments = listOf(
+            TranscriptSegment(
+                startMs = 51360L,
+                endMs = 54620L,
+                text = "Not interviewed by police.",
+                speaker = "Speaker 2",
+                words = seg1Words
+            ),
+            TranscriptSegment(
+                startMs = 54620L,
+                endMs = 55900L,
+                text = "thirty years ago.",
+                speaker = "Speaker 2",
+                words = seg2Words
+            )
+        )
+
+        val mergedSentences = segments.toSentences()
+        assertEquals(1, mergedSentences.size)
+        assertEquals("Not interviewed by police thirty years ago.", mergedSentences[0].text)
+        assertEquals(
+            "TimedWords must also have the false window-boundary period stripped so DiarizationEngine does not resurrect 'police.'",
+            listOf("Not", "interviewed", "by", "police", "thirty", "years", "ago."),
+            mergedSentences[0].words.map { it.word }
+        )
+
+        // Verify abutting straddled duplicate word ("trial." + "trial granted.")
+        val dupSegments = listOf(
+            TranscriptSegment(
+                startMs = 1347000L,
+                endMs = 1350420L,
+                text = "Kevin had a new trial.",
+                speaker = "Speaker 2",
+                words = listOf(
+                    AcousticAligner.TimedWord("Kevin", 1347000L, 1347500L),
+                    AcousticAligner.TimedWord("had", 1347500L, 1347900L),
+                    AcousticAligner.TimedWord("a", 1347900L, 1348100L),
+                    AcousticAligner.TimedWord("new", 1348100L, 1348600L),
+                    AcousticAligner.TimedWord("trial.", 1348600L, 1350420L)
+                )
+            ),
+            TranscriptSegment(
+                startMs = 1350420L,
+                endMs = 1352500L,
+                text = "trial granted.",
+                speaker = "Speaker 2",
+                words = listOf(
+                    AcousticAligner.TimedWord("trial", 1350420L, 1350900L),
+                    AcousticAligner.TimedWord("granted.", 1350900L, 1352500L)
+                )
+            )
+        )
+
+        val dedupedSentences = dupSegments.toSentences()
+        assertEquals(1, dedupedSentences.size)
+        assertEquals("Kevin had a new trial granted.", dedupedSentences[0].text)
+        assertEquals(
+            listOf("Kevin", "had", "a", "new", "trial", "granted."),
+            dedupedSentences[0].words.map { it.word }
+        )
+    }
 }

@@ -624,9 +624,69 @@ object AcousticAligner {
     }
 
     /**
+     * Finds the center of the quietest sustained acoustic pause (default 250ms rolling mean energy)
+     * inside [minBoundMs, maxBoundMs] without pulling toward the midpoint of the search interval.
+     * This prevents brief 20-40ms stop-consonant closures near the window midpoint from outscoring
+     * genuine inter-clause breath pauses elsewhere in the search window.
+     */
+    fun findSustainedAcousticPause(
+        energy: FloatArray,
+        minBoundMs: Long,
+        maxBoundMs: Long,
+        sustainedPauseMs: Long = 250L,
+        frameShiftMs: Int = FRAME_SHIFT_MS
+    ): Long {
+        if (energy.isEmpty() || maxBoundMs <= minBoundMs) return maxBoundMs
+
+        val fStart = (minBoundMs / frameShiftMs).toInt().coerceIn(0, energy.size)
+        val fEnd = (maxBoundMs / frameShiftMs).toInt().coerceIn(fStart, energy.size)
+        if (fEnd <= fStart) return maxBoundMs
+
+        val totalFrames = fEnd - fStart
+        val pauseFrames = max(1, (sustainedPauseMs / frameShiftMs).toInt()).coerceAtMost(totalFrames)
+
+        var windowSum = 0.0
+        for (i in 0 until pauseFrames) {
+            windowSum += energy[fStart + i].toDouble()
+        }
+
+        var maxMeanEnergy = windowSum / pauseFrames
+        val windowMeans = DoubleArray(totalFrames - pauseFrames + 1)
+        windowMeans[0] = maxMeanEnergy
+
+        for (idx in 1 until windowMeans.size) {
+            val entering = energy[fStart + idx + pauseFrames - 1].toDouble()
+            val leaving = energy[fStart + idx - 1].toDouble()
+            windowSum += entering - leaving
+            val mean = windowSum / pauseFrames
+            windowMeans[idx] = mean
+            if (mean > maxMeanEnergy) maxMeanEnergy = mean
+        }
+
+        var minScore = Double.MAX_VALUE
+        var bestWindowStart = fEnd - pauseFrames
+        val spanDenom = max(1, windowMeans.size - 1).toDouble()
+
+        for (idx in windowMeans.indices) {
+            val meanE = windowMeans[idx]
+            // Tiny tie-breaker (0.5% of max energy) favoring later cuts so windows stay near full length
+            // when multiple silence valleys are equally quiet, without distorting genuine pause detection.
+            val lateBonus = 0.005 * maxMeanEnergy * (1.0 - idx.toDouble() / spanDenom)
+            val score = meanE + lateBonus
+            if (score <= minScore) {
+                minScore = score
+                bestWindowStart = fStart + idx
+            }
+        }
+
+        val centerFrame = bestWindowStart + pauseFrames / 2
+        return (centerFrame.toLong() * frameShiftMs).coerceIn(minBoundMs, maxBoundMs)
+    }
+
+    /**
      * Plans [startSample, endSample) windows of length <= maxWindowSamples, snapping non-final cuts
-     * to the lowest-energy Short-Time Energy acoustic pause inside [minWindowSamples, maxWindowSamples]
-     * instead of slicing mid-word at rigid 30.000s intervals.
+     * to the lowest-energy sustained Short-Time Energy acoustic pause inside [minWindowSamples, maxWindowSamples]
+     * instead of slicing mid-word at rigid 30.000s intervals or inside brief consonant closures.
      */
     fun planPauseSnappedWindowRanges(
         totalSamples: Int,
@@ -658,14 +718,10 @@ object AcousticAligner {
             if (energy.isNotEmpty() && maxEndSample > minEndSample) {
                 val minBoundMs = minEndSample.toLong() * 1000L / sampleRate
                 val maxBoundMs = maxEndSample.toLong() * 1000L / sampleRate
-                val nominalMs = (minBoundMs + maxBoundMs) / 2L
-                val searchWindowMs = (maxBoundMs - minBoundMs) / 2L + 100L
-                val snappedMs = snapToAcousticPause(
+                val snappedMs = findSustainedAcousticPause(
                     energy = energy,
-                    nominalMs = nominalMs,
                     minBoundMs = minBoundMs,
-                    maxBoundMs = maxBoundMs,
-                    searchWindowMs = searchWindowMs
+                    maxBoundMs = maxBoundMs
                 )
                 cutSample = ((snappedMs * sampleRate) / 1000L).toInt().coerceIn(minEndSample, maxEndSample)
             }
