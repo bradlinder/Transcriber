@@ -17,9 +17,71 @@ object AcousticAligner {
 
     data class TimedSpan(val startMs: Long, val endMs: Long)
     data class TimedWord(val word: String, val startMs: Long, val endMs: Long)
+    data class NeuralToken(val text: String, val startMs: Long, val endMs: Long)
 
     const val FRAME_LEN_MS = 25
     const val FRAME_SHIFT_MS = 10
+
+    /**
+     * Assembles subword BPE/SentencePiece neural tokens into canonical TimedWords while preserving
+     * word boundaries (leading space, SentencePiece U+2581, newline, or standalone whitespace tokens).
+     */
+    fun assembleSubwordTokensToWords(
+        tokens: List<NeuralToken>,
+        replace: (String) -> String = { it }
+    ): List<TimedWord> {
+        if (tokens.isEmpty()) return emptyList()
+
+        val words = mutableListOf<TimedWord>()
+        val currentWord = StringBuilder()
+        var wordStartMs = -1L
+        var wordEndMs = -1L
+        var pendingWordBreak = false
+
+        for (tok in tokens) {
+            val rawText = tok.text
+            if (rawText.isBlank()) {
+                if (rawText.isNotEmpty()) {
+                    pendingWordBreak = true
+                }
+                continue
+            }
+
+            val startsNewWord = pendingWordBreak ||
+                rawText.startsWith(" ") ||
+                rawText.startsWith("\u2581") ||
+                rawText.startsWith("\n") ||
+                currentWord.isEmpty()
+
+            if (startsNewWord && currentWord.isNotEmpty()) {
+                val fullWord = replace(currentWord.toString()).trim()
+                if (fullWord.isNotEmpty()) {
+                    words.add(TimedWord(fullWord, wordStartMs, max(wordStartMs, wordEndMs)))
+                }
+                currentWord.clear()
+                wordStartMs = -1L
+            }
+            pendingWordBreak = false
+
+            val cleanTok = rawText.removePrefix("\u2581").trimStart()
+            if (cleanTok.isEmpty()) continue
+
+            if (wordStartMs < 0L) {
+                wordStartMs = tok.startMs
+            }
+            wordEndMs = max(wordEndMs, tok.endMs)
+            currentWord.append(cleanTok)
+        }
+
+        if (currentWord.isNotEmpty()) {
+            val fullWord = replace(currentWord.toString()).trim()
+            if (fullWord.isNotEmpty()) {
+                words.add(TimedWord(fullWord, wordStartMs, max(wordStartMs, wordEndMs)))
+            }
+        }
+
+        return words
+    }
 
     /**
      * Computes smoothed frame energy profile (100 frames/sec at 10ms shift).

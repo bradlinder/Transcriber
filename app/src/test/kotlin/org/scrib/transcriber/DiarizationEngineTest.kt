@@ -894,4 +894,75 @@ class DiarizationEngineTest {
             DiarizationEngine.smoothShortSpeakerRuns(multiTurnWords, multiSpeakers, minTurnDurationMs = 650L)
         )
     }
+
+    @Test
+    fun testAssembleSubwordTokensToWordsPreservesWordBoundaries() {
+        val tokens = listOf(
+            AcousticAligner.NeuralToken("\u2581Yes", 100L, 280L),
+            AcousticAligner.NeuralToken(",", 280L, 320L),
+            AcousticAligner.NeuralToken("\u2581we", 360L, 480L),
+            AcousticAligner.NeuralToken("\u2581invest", 500L, 760L),
+            AcousticAligner.NeuralToken("igate", 760L, 1020L),
+            AcousticAligner.NeuralToken("!", 1020L, 1060L)
+        )
+
+        val words = AcousticAligner.assembleSubwordTokensToWords(tokens)
+        assertEquals(listOf("Yes,", "we", "investigate!"), words.map { it.word })
+        assertEquals(100L, words[0].startMs)
+        assertEquals(320L, words[0].endMs)
+        assertEquals(500L, words[2].startMs)
+        assertEquals(1060L, words[2].endMs)
+    }
+
+    @Test
+    fun testAbsorbTransientAutoMicroClustersMergesLoneBackchannelsWhileKeepingSoundbites() {
+        val dim = 16
+        fun unitVec(primary: Int, tiltIdx: Int = -1, tiltVal: Float = 0f): FloatArray {
+            val v = FloatArray(dim)
+            v[primary] = 1.0f
+            if (tiltIdx >= 0) v[tiltIdx] = tiltVal
+            val norm = kotlin.math.sqrt(v.sumOf { (it * it).toDouble() }).toFloat()
+            for (i in v.indices) v[i] /= norm
+            return v
+        }
+
+        // Cluster 0: 5 chunks totaling 18s (Speaker 1, axis 0)
+        // Cluster 1: 5 chunks totaling 20s (Speaker 2, axis 1)
+        // Cluster 2: 1 lone 1.2s noisy backchannel closer to Cluster 1 (cosDist ~0.72, within reattach threshold) -> must absorb into Cluster 1
+        // Cluster 3: 1 genuine 4.5s soundbite (axis 3) -> must STAY independent (>= 2.0s)
+        val embeddings = listOf(
+            unitVec(0), unitVec(0), unitVec(0), unitVec(0), unitVec(0),
+            unitVec(1), unitVec(1), unitVec(1), unitVec(1), unitVec(1),
+            unitVec(4, tiltIdx = 1, tiltVal = 0.40f),
+            unitVec(3)
+        )
+        val labels = intArrayOf(0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 3)
+        val durationsMs = listOf(
+            3600L, 3600L, 3600L, 3600L, 3600L,
+            4000L, 4000L, 4000L, 4000L, 4000L,
+            1200L,
+            4500L
+        )
+
+        val autoMerged = DiarizationEngine.absorbTransientAutoMicroClusters(
+            primaryLabels = labels,
+            chunkDurationsMs = durationsMs,
+            embeddings = embeddings,
+            expectedSpeakers = "auto",
+            sensitivityThreshold = 0.68f
+        )
+
+        assertEquals("Lone 1.2s backchannel must absorb into closest major speaker (cluster 1)", 1, autoMerged[10])
+        assertEquals("Genuine 4.5s soundbite cluster must stay preserved", 3, autoMerged[11])
+
+        // Non-auto explicit modes must leave primary labels untouched
+        val explicitPreserved = DiarizationEngine.absorbTransientAutoMicroClusters(
+            primaryLabels = labels,
+            chunkDurationsMs = durationsMs,
+            embeddings = embeddings,
+            expectedSpeakers = "3",
+            sensitivityThreshold = 0.68f
+        )
+        assertArrayEquals(labels, explicitPreserved)
+    }
 }

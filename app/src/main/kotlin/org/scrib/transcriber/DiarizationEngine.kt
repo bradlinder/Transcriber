@@ -475,19 +475,22 @@ object DiarizationEngine {
             Log.i(TAG, "Clustering ${primaryEmbeddings.size} primary voiceprints (expected=$expectedSpeakers, sensThreshold=$sensitivityThreshold)...")
 
             val primaryLabels = clusterPrimaryEmbeddings(primaryEmbeddings, expectedSpeakers, sensitivityThreshold)
+            val refinedLabels = absorbTransientAutoMicroClusters(
+                primaryLabels = primaryLabels,
+                chunkDurationsMs = validPrimaryChunks.map { max(0L, it.endMs - it.startMs) },
+                embeddings = primaryEmbeddings,
+                expectedSpeakers = expectedSpeakers,
+                sensitivityThreshold = sensitivityThreshold
+            )
 
-            // Compute centroids for each formed primary cluster
-            val uniqueClusterIds = primaryLabels.distinct().sorted()
+            // Compute centroids for each formed primary cluster after micro-cluster absorption
+            val uniqueClusterIds = refinedLabels.distinct().sorted()
 
             val centroids = mutableMapOf<Int, FloatArray>()
             for (clusterId in uniqueClusterIds) {
-                val clusterEmbs = primaryEmbeddings.filterIndexed { i, _ -> primaryLabels[i] == clusterId }
+                val clusterEmbs = primaryEmbeddings.filterIndexed { i, _ -> refinedLabels[i] == clusterId }
                 centroids[clusterId] = computeCentroid(clusterEmbs)
             }
-
-            // In mixed audio (interviews, field tape, Zoom calls), every valid primary speech chunk (>= 0.8s)
-            // represents a genuine speaker turn. Preserve all valid clusters without forced outlier erasure.
-            val refinedLabels = primaryLabels
 
             // Assign short utterances (< 0.8s, e.g. "Yeah.") to the closest centroid using padded audio context
             val allSpans = mutableListOf<DiarSpan>()
@@ -564,6 +567,81 @@ object DiarizationEngine {
                 return clusterAhcThreshold(embeddings, sensitivityThreshold, minK = 1)
             }
         }
+    }
+
+    /**
+     * In Auto mode, brief isolated utterances (0.8s-2.0s single-turn backchannels such as
+     * "No, no." or "Right.") produce single-window embeddings that can land just outside
+     * the primary AHC cutoff and spawn spurious 1-cue speaker labels. When established
+     * conversational speakers (>= minMajorClusterDurationMs) are present, absorb these
+     * transient micro-clusters (< maxMicroClusterDurationMs) into their acoustically closest
+     * major speaker centroid while preserving genuine multi-second soundbite speakers (>= 2.0s).
+     */
+    internal fun absorbTransientAutoMicroClusters(
+        primaryLabels: IntArray,
+        chunkDurationsMs: List<Long>,
+        embeddings: List<FloatArray>,
+        expectedSpeakers: String,
+        sensitivityThreshold: Float,
+        maxMicroClusterDurationMs: Long = 2_000L,
+        minMajorClusterDurationMs: Long = 8_000L
+    ): IntArray {
+        if (primaryLabels.size <= 1 ||
+            primaryLabels.size != chunkDurationsMs.size ||
+            primaryLabels.size != embeddings.size
+        ) {
+            return primaryLabels
+        }
+        val normalizedExpected = expectedSpeakers.lowercase().trim()
+        if (normalizedExpected.isNotEmpty() && normalizedExpected != "auto") {
+            return primaryLabels
+        }
+
+        val memberIndices = linkedMapOf<Int, MutableList<Int>>()
+        val totalDurations = mutableMapOf<Int, Long>()
+        for (i in primaryLabels.indices) {
+            val cId = primaryLabels[i]
+            memberIndices.getOrPut(cId) { mutableListOf() }.add(i)
+            totalDurations[cId] = (totalDurations[cId] ?: 0L) + max(0L, chunkDurationsMs[i])
+        }
+        if (memberIndices.size <= 1) return primaryLabels
+
+        val majorClusters = memberIndices.keys.filter { (totalDurations[it] ?: 0L) >= minMajorClusterDurationMs }
+        if (majorClusters.isEmpty()) return primaryLabels
+
+        val centroids = mutableMapOf<Int, FloatArray>()
+        for ((cId, indices) in memberIndices) {
+            centroids[cId] = computeCentroid(indices.map { embeddings[it] })
+        }
+
+        val maxReattachDistance = min(0.92f, sensitivityThreshold + 0.24f)
+        val out = primaryLabels.clone()
+        for ((cId, indices) in memberIndices) {
+            val dur = totalDurations[cId] ?: 0L
+            if (dur >= maxMicroClusterDurationMs || cId in majorClusters) continue
+            val microCentroid = centroids[cId] ?: continue
+
+            var bestMajor = -1
+            var bestDistance = Float.MAX_VALUE
+            for (majorId in majorClusters) {
+                val majorCentroid = centroids[majorId] ?: continue
+                val dist = cosineDistance(microCentroid, majorCentroid)
+                if (dist < bestDistance) {
+                    bestDistance = dist
+                    bestMajor = majorId
+                }
+            }
+            if (bestMajor != -1 && bestDistance <= maxReattachDistance) {
+                for (idx in indices) {
+                    out[idx] = bestMajor
+                }
+                Log.i(
+                    TAG,
+                    "Absorbed Auto micro-cluster $cId (${dur}ms, ${indices.size} chunk) into cluster $bestMajor (dist=${"%.3f".format(bestDistance)})"
+                )
+            }
+        }
+        return out
     }
 
     internal fun clusterAhcFixedK(embeddings: List<FloatArray>, k: Int): IntArray {

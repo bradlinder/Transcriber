@@ -18,8 +18,9 @@ on:
       variant:
         description: 'App variant to build'
         type: choice
-        default: 'scrib'
+        default: 'all'
         options:
+          - all
           - scrib
           - max
           - remote
@@ -51,10 +52,51 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  plan:
+    name: Plan build matrix
+    runs-on: ubuntu-latest
+    outputs:
+      variants: ${{ steps.resolve.outputs.variants }}
+      build_type: ${{ steps.resolve.outputs.build_type }}
+      abis: ${{ steps.resolve.outputs.abis }}
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve build matrix
+        id: resolve
+        run: |
+          VARIANT="${{ inputs.variant }}"
+          BUILD_TYPE="${{ inputs.build_type }}"
+          ABIS="${{ inputs.abis }}"
+          [ -z "$VARIANT" ] && VARIANT="all"
+          [ -z "$BUILD_TYPE" ] && BUILD_TYPE="release"
+          [ -z "$ABIS" ] && ABIS="arm64-v8a"
+
+          if [ "$VARIANT" = "all" ]; then
+            VARIANTS_JSON='["scrib","max"]'
+          else
+            VARIANTS_JSON="[\"${VARIANT}\"]"
+          fi
+
+          VERSION_NAME="$(sed -n "s/.*versionName '\([^']*\)'.*/\1/p" app/build.gradle | head -n1)"
+          [ -z "$VERSION_NAME" ] && VERSION_NAME="dev"
+
+          echo "variants=$VARIANTS_JSON" >> "$GITHUB_OUTPUT"
+          echo "build_type=$BUILD_TYPE" >> "$GITHUB_OUTPUT"
+          echo "abis=$ABIS" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION_NAME" >> "$GITHUB_OUTPUT"
+
   build-apk:
-    name: Build ${{ inputs.variant || 'scrib' }} APK
+    name: Build ${{ matrix.variant }} APK
+    needs: plan
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: ${{ fromJSON(needs.plan.outputs.variants) }}
 
     steps:
       - name: Checkout repository
@@ -97,7 +139,7 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       - name: Fetch sherpa-onnx runtime (max variant only)
-        if: ${{ inputs.variant == 'max' }}
+        if: ${{ matrix.variant == 'max' }}
         run: bash scripts/download-sherpa-onnx.sh
 
       - name: Prepare APK signing keystore
@@ -118,16 +160,11 @@ jobs:
               -dname "CN=Scrib CI Build, OU=Transcriber, O=Scrib, C=US"
           fi
 
-      - name: Resolve build arguments
+      - name: Resolve build flags
         id: cfg
         run: |
-          VARIANT="${{ inputs.variant }}"
-          BUILD_TYPE="${{ inputs.build_type }}"
-          ABIS="${{ inputs.abis }}"
-          [ -z "$VARIANT" ] && VARIANT="scrib"
-          [ -z "$BUILD_TYPE" ] && BUILD_TYPE="release"
-          [ -z "$ABIS" ] && ABIS="arm64-v8a"
-
+          VARIANT="${{ matrix.variant }}"
+          BUILD_TYPE="${{ needs.plan.outputs.build_type }}"
           VARIANT_FLAG=""
           if [ "$VARIANT" = "max" ]; then
             VARIANT_FLAG="-PwithSherpa"
@@ -135,23 +172,15 @@ jobs:
             VARIANT_FLAG="-PwithRemote"
           fi
 
-          TEST_TASK=":app:testDebugUnitTest"
           if [ "$BUILD_TYPE" = "debug" ]; then
             ASSEMBLE_TASK=":app:assembleDebug"
           else
             ASSEMBLE_TASK=":app:assembleRelease"
           fi
 
-          VERSION_NAME="$(sed -n "s/.*versionName '\([^']*\)'.*/\1/p" app/build.gradle | head -n1)"
-          [ -z "$VERSION_NAME" ] && VERSION_NAME="dev"
-
-          echo "variant=$VARIANT" >> "$GITHUB_OUTPUT"
-          echo "build_type=$BUILD_TYPE" >> "$GITHUB_OUTPUT"
-          echo "abis=$ABIS" >> "$GITHUB_OUTPUT"
           echo "variant_flag=$VARIANT_FLAG" >> "$GITHUB_OUTPUT"
           echo "assemble_task=$ASSEMBLE_TASK" >> "$GITHUB_OUTPUT"
-          echo "test_task=$TEST_TASK" >> "$GITHUB_OUTPUT"
-          echo "version=$VERSION_NAME" >> "$GITHUB_OUTPUT"
+          echo "test_task=:app:testDebugUnitTest" >> "$GITHUB_OUTPUT"
           echo "python_bin=$(which python3)" >> "$GITHUB_OUTPUT"
 
       - name: Run unit tests
@@ -160,7 +189,7 @@ jobs:
           chmod +x gradlew
           ./gradlew ${{ steps.cfg.outputs.test_task }} \
             ${{ steps.cfg.outputs.variant_flag }} \
-            -Pabis="${{ steps.cfg.outputs.abis }}" \
+            -Pabis="${{ needs.plan.outputs.abis }}" \
             -Pchaquopy.buildPython="${{ steps.cfg.outputs.python_bin }}" \
             --no-daemon
 
@@ -169,16 +198,15 @@ jobs:
           chmod +x gradlew
           ./gradlew ${{ steps.cfg.outputs.assemble_task }} \
             ${{ steps.cfg.outputs.variant_flag }} \
-            -Pabis="${{ steps.cfg.outputs.abis }}" \
+            -Pabis="${{ needs.plan.outputs.abis }}" \
             -Pchaquopy.buildPython="${{ steps.cfg.outputs.python_bin }}" \
             --no-daemon
 
       - name: Package APK artifacts
         run: |
           mkdir -p dist
-          VERSION="${{ steps.cfg.outputs.version }}"
-          VARIANT="${{ steps.cfg.outputs.variant }}"
-          BUILD_TYPE="${{ steps.cfg.outputs.build_type }}"
+          VERSION="${{ needs.plan.outputs.version }}"
+          VARIANT="${{ matrix.variant }}"
           FOUND=0
           for apk in $(find app/build/outputs/apk -type f -name '*.apk'); do
             FOUND=1
@@ -194,26 +222,42 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Transcriber-v${{ steps.cfg.outputs.version }}-${{ steps.cfg.outputs.variant }}-${{ steps.cfg.outputs.build_type }}-apk
+          name: Transcriber-v${{ needs.plan.outputs.version }}-${{ matrix.variant }}-${{ needs.plan.outputs.build_type }}-apk
           path: dist/*.apk
           if-no-files-found: error
           retention-days: 30
 
-      - name: Publish APK to GitHub Release
-        if: ${{ (inputs.publish_release == null || inputs.publish_release) && (steps.cfg.outputs.build_type == 'release' || github.event_name == 'workflow_dispatch') }}
+  publish-release:
+    name: Publish GitHub Release
+    needs: [plan, build-apk]
+    if: ${{ (inputs.publish_release == null || inputs.publish_release) && (needs.plan.outputs.build_type == 'release' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download built APKs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: Transcriber-*-apk
+          path: apks
+          merge-multiple: true
+
+      - name: Publish APKs to GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="v${{ steps.cfg.outputs.version }}"
+          TAG="v${{ needs.plan.outputs.version }}"
           TITLE="Transcriber ${TAG}"
-          NOTES="Automated APK build for ${TAG} (variant: ${{ steps.cfg.outputs.variant }}, ABIs: ${{ steps.cfg.outputs.abis }}, build: ${{ steps.cfg.outputs.build_type }})."
+          NOTES="Automated APK build for ${TAG} (variants: ${{ join(fromJSON(needs.plan.outputs.variants), ', ') }}, ABIs: ${{ needs.plan.outputs.abis }}, build: ${{ needs.plan.outputs.build_type }})."
 
+          ls -lh apks/
           git push --force origin "$GITHUB_SHA:refs/tags/${TAG}"
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release edit "$TAG" --title "$TITLE" --notes "$NOTES"
-            gh release upload "$TAG" dist/*.apk --clobber
+            gh release upload "$TAG" apks/*.apk --clobber
           else
-            gh release create "$TAG" dist/*.apk \
+            gh release create "$TAG" apks/*.apk \
               --title "$TITLE" \
               --notes "$NOTES"
           fi
@@ -221,9 +265,9 @@ jobs:
           git push --force origin "$GITHUB_SHA:refs/tags/latest"
           if gh release view latest >/dev/null 2>&1; then
             gh release edit latest --title "$TITLE" --notes "$NOTES"
-            gh release upload latest dist/*.apk --clobber
+            gh release upload latest apks/*.apk --clobber
           else
-            gh release create latest dist/*.apk \
+            gh release create latest apks/*.apk \
               --title "$TITLE" \
               --notes "$NOTES"
           fi

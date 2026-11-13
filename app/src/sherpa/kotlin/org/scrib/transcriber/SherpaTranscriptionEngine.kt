@@ -14,10 +14,15 @@ import org.opentranscribe.api.ITranscriptionCallback
 import org.opentranscribe.api.StreamRequest
 import org.opentranscribe.api.TranscriberCapabilities
 import org.opentranscribe.api.TranscriptionRequest
-import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.math.roundToLong
 
 class SherpaTranscriptionEngine private constructor(private val appContext: Context) : TranscriptionEngine {
+
+    private data class DecodedWindow(
+        val text: String,
+        val tokens: List<AcousticAligner.NeuralToken> = emptyList()
+    )
 
     private val nativeLock = Any()
 
@@ -67,9 +72,12 @@ class SherpaTranscriptionEngine private constructor(private val appContext: Cont
     override fun openStream(request: StreamRequest?, callback: ITranscriptionCallback): AudioStream {
         val language = request?.languageHint ?: activeLanguage()
         return AudioStream(request, callback) { samples, sampleCount, _, _, _ ->
-            val text = Dictionary.applyReplacements(
-                appContext, decodeWindow(copyWindow(samples, 0, sampleCount), request?.languageHint)
-            )
+            val chunk = FloatArray(sampleCount)
+            val floats = samples.duplicate().order(ByteOrder.nativeOrder()).asFloatBuffer()
+            floats.position(0)
+            floats.get(chunk, 0, sampleCount)
+            val decoded = decodeWindow(chunk, request?.languageHint)
+            val text = Dictionary.applyReplacements(appContext, decoded.text)
             Log.d(TAG, "stream chunk: $sampleCount samples -> ${text.length} chars")
             TranscribedSegment(text, language)
         }
@@ -77,6 +85,34 @@ class SherpaTranscriptionEngine private constructor(private val appContext: Cont
 
     private fun activeLanguage(): String? =
         activeModelInfo()?.languages?.singleOrNull()
+
+    override fun transcribeDecodedToSegments(
+        pcm: DecodedAudio,
+        languageHint: String?,
+        cancellation: CancellationToken,
+        onProgress: (Int) -> Unit,
+        onPartial: (String) -> Unit,
+        onMetrics: (TranscriptionMetrics) -> Unit
+    ): List<TranscriptSegment> {
+        if (cancellation.isCancelled) {
+            throw CancelledException()
+        }
+        if (pcm.sampleCount == 0) {
+            throw DecodeException("No audio decoded")
+        }
+        val audioDurationMs = pcm.sampleCount.toLong() * 1000L / SAMPLE_RATE
+        onMetrics(TranscriptionMetrics(audioDurationMs = audioDurationMs))
+        return transcribePcm(
+            pcm = pcm,
+            languageHint = languageHint,
+            cancellation = cancellation,
+            onProgress = onProgress,
+            onPartial = onPartial,
+            onMetrics = onMetrics,
+            audioDurationMs = audioDurationMs,
+            decodeMs = 0L
+        )
+    }
 
     override fun transcribeToSegments(
         audio: ParcelFileDescriptor,
@@ -102,15 +138,14 @@ class SherpaTranscriptionEngine private constructor(private val appContext: Cont
             val audioDurationMs = pcm.sampleCount.toLong() * 1000L / SAMPLE_RATE
             onMetrics(TranscriptionMetrics(audioDurationMs = audioDurationMs, decodeMs = decodeMs))
             return transcribePcm(
-                pcm.samples,
-                pcm.sampleCount,
-                languageHint,
-                cancellation,
-                onProgress,
-                onPartial,
-                onMetrics,
-                audioDurationMs,
-                decodeMs
+                pcm = pcm,
+                languageHint = languageHint,
+                cancellation = cancellation,
+                onProgress = onProgress,
+                onPartial = onPartial,
+                onMetrics = onMetrics,
+                audioDurationMs = audioDurationMs,
+                decodeMs = decodeMs
             )
         } finally {
             try {
@@ -121,8 +156,7 @@ class SherpaTranscriptionEngine private constructor(private val appContext: Cont
     }
 
     private fun transcribePcm(
-        samples: ByteBuffer,
-        sampleCount: Int,
+        pcm: DecodedAudio,
         languageHint: String?,
         cancellation: CancellationToken,
         onProgress: (Int) -> Unit,
@@ -169,10 +203,10 @@ class SherpaTranscriptionEngine private constructor(private val appContext: Cont
                 )
             )
             val vadPath = ModelManager.sherpaVadModelPath(appContext)
-            return if (vadPath != null && sampleCount > WINDOW_SAMPLES) {
-                transcribeWithVad(samples, sampleCount, vadPath, languageHint, cancellation, ::reportProgress, onPartial)
+            return if (vadPath != null && pcm.sampleCount > WINDOW_SAMPLES) {
+                transcribeWithVad(pcm, vadPath, languageHint, cancellation, ::reportProgress, onPartial)
             } else {
-                transcribeWindows(samples, sampleCount, languageHint, cancellation, ::reportProgress, onPartial)
+                transcribeWindows(pcm, languageHint, cancellation, ::reportProgress, onPartial)
             }
         } finally {
             onMetrics(
@@ -189,57 +223,89 @@ class SherpaTranscriptionEngine private constructor(private val appContext: Cont
     }
 
     private fun transcribeWindows(
-        samples: ByteBuffer,
-        sampleCount: Int,
+        pcm: DecodedAudio,
         languageHint: String?,
         cancellation: CancellationToken,
         onProgress: (Int) -> Unit,
         onPartial: (String) -> Unit
     ): List<TranscriptSegment> {
-        val windows = (sampleCount + WINDOW_SAMPLES - 1) / WINDOW_SAMPLES
-        val segments = ArrayList<TranscriptSegment>(windows)
+        val sampleCount = pcm.sampleCount
+        val windowRanges = if (sampleCount <= WINDOW_SAMPLES) {
+            listOf(0 to sampleCount)
+        } else {
+            val energy = AcousticAligner.computeEnergyProfile(pcm, SAMPLE_RATE)
+            AcousticAligner.planPauseSnappedWindowRanges(
+                totalSamples = sampleCount,
+                maxWindowSamples = WINDOW_SAMPLES,
+                minWindowSamples = minOf(WINDOW_SAMPLES, MIN_WINDOW_SAMPLES),
+                energy = energy,
+                sampleRate = SAMPLE_RATE
+            )
+        }
+        val segments = ArrayList<TranscriptSegment>(windowRanges.size)
         val cumulative = StringBuilder()
-        for (i in 0 until windows) {
+        for (i in windowRanges.indices) {
             if (cancellation.isCancelled) {
                 throw CancelledException()
             }
-            val offset = i * WINDOW_SAMPLES
-            val length = minOf(WINDOW_SAMPLES, sampleCount - offset)
-            val text = Dictionary.applyReplacements(
-                appContext, decodeWindow(copyWindow(samples, offset, length), languageHint)
-            )
+            val (offset, endSample) = windowRanges[i]
+            val length = endSample - offset
+            if (length <= 0) continue
+
+            val windowAudio = FloatArray(length)
+            val readCount = pcm.readSlice(offset, length, windowAudio)
+            if (readCount <= 0) continue
+            val samplesForDecode = if (readCount == length) windowAudio else windowAudio.copyOf(readCount)
+
+            val decoded = decodeWindow(samplesForDecode, languageHint)
+            val text = Dictionary.applyReplacements(appContext, decoded.text)
             if (text.isNotEmpty()) {
-                val startMs = offset.toLong() * 1000 / SAMPLE_RATE
-                val endMs = (offset + length).toLong() * 1000 / SAMPLE_RATE
-                segments.add(TranscriptSegment(startMs, endMs, if (segments.isEmpty()) text else " $text"))
+                val startMs = offset.toLong() * 1000L / SAMPLE_RATE
+                val endMs = (offset + readCount).toLong() * 1000L / SAMPLE_RATE
+                val timedWords = buildSegmentWords(decoded.tokens, startMs, endMs, text)
+                segments.add(
+                    TranscriptSegment(
+                        startMs = startMs,
+                        endMs = endMs,
+                        text = if (segments.isEmpty()) text else " $text",
+                        words = timedWords
+                    )
+                )
                 if (cumulative.isNotEmpty()) {
                     cumulative.append(' ')
                 }
                 cumulative.append(text)
                 onPartial(cumulative.toString())
             }
-            onProgress(((i + 1) * 100) / windows)
+            onProgress(((i + 1) * 100) / windowRanges.size)
         }
         if (cancellation.isCancelled) {
             throw CancelledException()
         }
-        return segments
+        return markParagraphs(segments, emptyList())
     }
 
     private fun transcribeWithVad(
-        samples: ByteBuffer,
-        sampleCount: Int,
+        pcm: DecodedAudio,
         vadPath: String,
         languageHint: String?,
         cancellation: CancellationToken,
         onProgress: (Int) -> Unit,
         onPartial: (String) -> Unit
     ): List<TranscriptSegment> {
+        val sampleCount = pcm.sampleCount
         val vad = try {
             Vad(
                 null,
                 VadModelConfig(
-                    sileroVadModelConfig = SileroVadModelConfig(model = vadPath),
+                    sileroVadModelConfig = SileroVadModelConfig(
+                        model = vadPath,
+                        threshold = VAD_THRESHOLD,
+                        minSilenceDuration = VAD_MIN_SILENCE_S,
+                        minSpeechDuration = VAD_MIN_SPEECH_S,
+                        windowSize = VAD_WINDOW_SAMPLES,
+                        maxSpeechDuration = VAD_MAX_SPEECH_S
+                    ),
                     sampleRate = SAMPLE_RATE,
                     numThreads = 1,
                     provider = "cpu"
@@ -247,23 +313,31 @@ class SherpaTranscriptionEngine private constructor(private val appContext: Cont
             )
         } catch (e: Throwable) {
             Log.w(TAG, "Sherpa VAD could not load", e)
-            return transcribeWindows(samples, sampleCount, languageHint, cancellation, onProgress, onPartial)
+            return transcribeWindows(pcm, languageHint, cancellation, onProgress, onPartial)
         }
         val segments = ArrayList<TranscriptSegment>()
         val speech = ArrayList<SpeechSpan>()
         val cumulative = StringBuilder()
-        val input = samples.duplicate().order(ByteOrder.nativeOrder()).asFloatBuffer()
         fun appendSegment(start: Int, samples: FloatArray) {
             if (samples.isEmpty()) {
                 return
             }
-            val text = Dictionary.applyReplacements(appContext, decodeWindow(samples, languageHint))
+            val decoded = decodeWindow(samples, languageHint)
+            val text = Dictionary.applyReplacements(appContext, decoded.text)
             if (text.isEmpty()) {
                 return
             }
-            val startMs = start.toLong() * 1000 / SAMPLE_RATE
-            val endMs = (start + samples.size).toLong() * 1000 / SAMPLE_RATE
-            segments.add(TranscriptSegment(startMs, endMs, if (segments.isEmpty()) text else " $text"))
+            val startMs = start.toLong() * 1000L / SAMPLE_RATE
+            val endMs = (start + samples.size).toLong() * 1000L / SAMPLE_RATE
+            val timedWords = buildSegmentWords(decoded.tokens, startMs, endMs, text)
+            segments.add(
+                TranscriptSegment(
+                    startMs = startMs,
+                    endMs = endMs,
+                    text = if (segments.isEmpty()) text else " $text",
+                    words = timedWords
+                )
+            )
             speech.add(SpeechSpan(startMs, endMs))
             if (cumulative.isNotEmpty()) {
                 cumulative.append(' ')
@@ -275,6 +349,7 @@ class SherpaTranscriptionEngine private constructor(private val appContext: Cont
         // of audio — tens of thousands of times on a long recording, each one waking the metrics
         // sampler and the UI for a percent that has not moved. Only the changes are worth a callback.
         var reportedPercent = -1
+        val chunkBuf = FloatArray(VAD_WINDOW_SAMPLES)
         try {
             var offset = 0
             while (offset < sampleCount) {
@@ -282,16 +357,16 @@ class SherpaTranscriptionEngine private constructor(private val appContext: Cont
                     throw CancelledException()
                 }
                 val length = minOf(VAD_WINDOW_SAMPLES, sampleCount - offset)
-                val chunk = FloatArray(length)
-                input.position(offset)
-                input.get(chunk)
+                val readCount = pcm.readSlice(offset, length, chunkBuf)
+                if (readCount <= 0) break
+                val chunk = if (readCount == chunkBuf.size) chunkBuf else chunkBuf.copyOf(readCount)
                 vad.acceptWaveform(chunk)
                 while (!vad.empty()) {
                     val segment = vad.front()
                     appendSegment(segment.start, segment.samples)
                     vad.pop()
                 }
-                offset += length
+                offset += readCount
                 val percent = ((offset.toLong() * 100) / sampleCount).toInt()
                 if (percent != reportedPercent) {
                     reportedPercent = percent
@@ -314,7 +389,60 @@ class SherpaTranscriptionEngine private constructor(private val appContext: Cont
         return markParagraphs(segments, speech)
     }
 
-    private fun decodeWindow(samples: FloatArray, languageHint: String? = null): String {
+    private fun buildSegmentWords(
+        windowTokens: List<AcousticAligner.NeuralToken>,
+        segmentStartMs: Long,
+        segmentEndMs: Long,
+        segmentText: String
+    ): List<AcousticAligner.TimedWord> {
+        if (windowTokens.isEmpty()) return emptyList()
+        val shiftedTokens = windowTokens.map { tok ->
+            AcousticAligner.NeuralToken(
+                text = tok.text,
+                startMs = (segmentStartMs + tok.startMs).coerceIn(segmentStartMs, maxOf(segmentStartMs, segmentEndMs)),
+                endMs = (segmentStartMs + tok.endMs).coerceIn(segmentStartMs, maxOf(segmentStartMs, segmentEndMs))
+            )
+        }
+        val assembled = AcousticAligner.assembleSubwordTokensToWords(shiftedTokens) { raw ->
+            Dictionary.applyReplacements(appContext, raw)
+        }
+        if (assembled.isEmpty()) return emptyList()
+        return AcousticAligner.reconcileWordsWithSegmentText(segmentText, assembled, segmentStartMs, segmentEndMs)
+    }
+
+    private fun extractNeuralTokens(
+        tokens: Array<String>,
+        timestamps: FloatArray,
+        durations: FloatArray,
+        windowDurationMs: Long
+    ): List<AcousticAligner.NeuralToken> {
+        if (tokens.isEmpty() || timestamps.size != tokens.size) return emptyList()
+        if (tokens.size > 1 && timestamps.all { it <= 0f }) return emptyList()
+
+        val hasDurations = durations.size == tokens.size
+        val out = ArrayList<AcousticAligner.NeuralToken>(tokens.size)
+        for (i in tokens.indices) {
+            val startMs = (timestamps[i].toDouble() * 1000.0).roundToLong().coerceIn(0L, windowDurationMs)
+            val nextStartMs = if (i + 1 < timestamps.size) {
+                (timestamps[i + 1].toDouble() * 1000.0).roundToLong().coerceIn(startMs, windowDurationMs)
+            } else {
+                windowDurationMs
+            }
+            val rawEndMs = if (hasDurations && durations[i] > 0f) {
+                startMs + (durations[i].toDouble() * 1000.0).roundToLong()
+            } else if (nextStartMs > startMs) {
+                nextStartMs
+            } else {
+                startMs + 80L
+            }
+            val endMs = rawEndMs.coerceIn(startMs, windowDurationMs)
+            out.add(AcousticAligner.NeuralToken(tokens[i], startMs, endMs))
+        }
+        return out
+    }
+
+    private fun decodeWindow(samples: FloatArray, languageHint: String? = null): DecodedWindow {
+        val windowDurationMs = maxOf(1L, samples.size.toLong() * 1000L / SAMPLE_RATE)
         synchronized(nativeLock) {
             val info = activeModelInfo() ?: throw ModelNotAvailableException()
             ensureRecognizerLocked(languageHint)
@@ -327,7 +455,9 @@ class SherpaTranscriptionEngine private constructor(private val appContext: Cont
                     while (active.isReady(stream)) {
                         active.decode(stream)
                     }
-                    return active.getResult(stream).text.trim()
+                    val result = active.getResult(stream)
+                    val tokens = extractNeuralTokens(result.tokens, result.timestamps, FloatArray(0), windowDurationMs)
+                    return DecodedWindow(result.text.trim(), tokens)
                 } finally {
                     try {
                         stream.release()
@@ -340,7 +470,9 @@ class SherpaTranscriptionEngine private constructor(private val appContext: Cont
             try {
                 stream.acceptWaveform(samples, SAMPLE_RATE)
                 active.decode(stream)
-                return active.getResult(stream).text.trim()
+                val result = active.getResult(stream)
+                val tokens = extractNeuralTokens(result.tokens, result.timestamps, result.durations, windowDurationMs)
+                return DecodedWindow(result.text.trim(), tokens)
             } finally {
                 try {
                     stream.release()
@@ -348,15 +480,6 @@ class SherpaTranscriptionEngine private constructor(private val appContext: Cont
                 }
             }
         }
-    }
-
-    private fun copyWindow(samples: ByteBuffer, offset: Int, length: Int): FloatArray {
-        val floats = samples.duplicate().order(ByteOrder.nativeOrder()).asFloatBuffer()
-        floats.position(offset)
-        floats.limit(offset + length)
-        val out = FloatArray(length)
-        floats.get(out)
-        return out
     }
 
     override fun releaseModel() {
@@ -475,7 +598,14 @@ class SherpaTranscriptionEngine private constructor(private val appContext: Cont
         const val SAMPLE_RATE = 16000
 
         const val WINDOW_SAMPLES = SAMPLE_RATE * 30
+        const val MIN_WINDOW_SAMPLES = SAMPLE_RATE * 24
         const val VAD_WINDOW_SAMPLES = 512
+
+        // Aligned with TranscribeVad (v0.69): sensitive onset retention with 28s max continuous span
+        private const val VAD_THRESHOLD = 0.25f
+        private const val VAD_MIN_SILENCE_S = 0.50f
+        private const val VAD_MIN_SPEECH_S = 0.10f
+        private const val VAD_MAX_SPEECH_S = 28.0f
 
         @Volatile
         private var instance: SherpaTranscriptionEngine? = null

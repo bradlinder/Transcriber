@@ -5,7 +5,7 @@ Transcriber is an offline-first, privacy-focused Android application designed fo
 
 ---
 
-## 2. Near-Term Feature Set & Current Version (`v0.70`)
+## 2. Near-Term Feature Set & Current Version (`v0.71`)
 - **Native C++ Engine:** Powered by Scrib's C++ `transcribe.cpp` / `whisper.cpp` / `ggml` runtime.
 - **Sentence-Boundary Paragraph Breaking:** Automatically breaks paragraphs at sentence-ending punctuation (`.?!`) when the configurable word threshold is reached (default 70 words, adjustable from 20 to 200 words in Settings).
 - **Intelligent Sentence Fragment Merger:** Automatically attaches short, lowercase sentence fragments ($\le 2$ words, e.g. `"examples."`) to parent sentences before paragraph breaks.
@@ -338,6 +338,12 @@ Transcriber is an offline-first, privacy-focused Android application designed fo
 - **Overview:**
   - Updated `.github/workflows/build-apk.yml` with `permissions: contents: write` and a `Publish APK to GitHub Release` step that publishes built `.apk` files directly to both `v<version>` and `latest` GitHub Releases (in addition to Actions artifacts).
   - Updated `.github/workflows/release.yml` to configure Python 3.12 (`-Pchaquopy.buildPython`), Android SDK API 35 / NDK 27, keystore fallback, and APK verification compatible with `app/build.gradle`.
+
+### [x] Priority 51 (COMPLETED in v0.71): Sherpa/Parakeet Pause-Snapped Windowing, Neural Timestamps & Auto Micro-Cluster Consolidation
+- **Overview:**
+  - Upgraded `SherpaTranscriptionEngine` (`parakeet-onnx` and other Sherpa models) with `AcousticAligner.planPauseSnappedWindowRanges` (`24s–30s` STE pause cuts replacing blind `30s` slices), neural token/word timestamps extracted via shared `AcousticAligner.assembleSubwordTokensToWords`, tuned `SileroVadModelConfig` thresholds (`0.25f`, `0.50s` min silence, `0.10s` min speech, `28.0s` max span), and `transcribeDecodedToSegments` support.
+  - Added `DiarizationEngine.absorbTransientAutoMicroClusters` so isolated `< 2.0s` single-utterance backchannels in `Auto` mode consolidate into their closest established (`>= 8.0s`) speaker centroid while preserving genuine soundbite speakers (`>= 2.0s`).
+  - Updated `.github/workflows/build-apk.yml` to build and publish both `scrib` and `max` APKs cleanly on push.
 
 ---
 
