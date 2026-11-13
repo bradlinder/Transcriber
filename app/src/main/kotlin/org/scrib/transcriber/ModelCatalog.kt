@@ -50,9 +50,6 @@ object ModelCatalog {
         standard("tiny-q5_1", "Whisper Tiny (Multilingual)", "ggml-tiny-q5_1.bin", 32_200_000, true, 1),
         standard("base-q5_1", "Whisper Base (Multilingual)", "ggml-base-q5_1.bin", 57_800_000, true, 2, recommended = true),
         standard("small-q5_1", "Whisper Small (Multilingual)", "ggml-small-q5_1.bin", 190_000_000, true, 3),
-        standard("tiny.en-q5_1", "Whisper Tiny (English)", "ggml-tiny.en-q5_1.bin", 32_200_000, false, 1),
-        standard("base.en-q5_1", "Whisper Base (English)", "ggml-base.en-q5_1.bin", 57_800_000, false, 2),
-        standard("small.en-q5_1", "Whisper Small (English)", "ggml-small.en-q5_1.bin", 190_000_000, false, 3),
         // The families below are not whisper at all: one ggml library reads them all, one file is
         // the whole model, and the quant is part of the file name. Ordered by what a phone can
         // still run at a sensible pace, cheapest first.
