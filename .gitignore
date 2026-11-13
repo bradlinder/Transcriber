@@ -12,3 +12,8 @@ app/libs/*.aar
 *.jks
 
 *.zip
+*.srt
+*.vtt
+*.lrc
+*.docx
+public/assets/aistudio/
