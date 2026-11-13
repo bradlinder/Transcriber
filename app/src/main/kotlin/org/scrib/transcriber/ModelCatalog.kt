@@ -56,9 +56,9 @@ object ModelCatalog {
         // The families below are not whisper at all: one ggml library reads them all, one file is
         // the whole model, and the quant is part of the file name. Ordered by what a phone can
         // still run at a sensible pace, cheapest first.
-        gguf("parakeet-tdt_ctc-110m-gguf", "Parakeet English", "parakeet-tdt_ctc-110m-Q4_K_M.gguf", 90_000_000, false, 2, recommended = true),
+        gguf("parakeet-tdt_ctc-110m-gguf", "Parakeet (English)", "parakeet-tdt_ctc-110m-Q4_K_M.gguf", 90_000_000, false, 2, recommended = true),
         gguf("canary-180m-flash-gguf", "Canary Flash (Multilingual)", "canary-180m-flash-Q4_K_M.gguf", 139_200_000, true, 3),
-        gguf("parakeet-tdt-0.6b-v3-gguf", "Parakeet Multilingual", "parakeet-tdt-0.6b-v3-Q4_K_M.gguf", 485_400_000, true, 4)
+        gguf("parakeet-tdt-0.6b-v3-gguf", "Parakeet (Multilingual)", "parakeet-tdt-0.6b-v3-Q4_K_M.gguf", 485_400_000, true, 4)
     )
 
     val PARAKEET_LANGUAGES: List<String> = listOf(
