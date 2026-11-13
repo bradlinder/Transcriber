@@ -510,12 +510,12 @@ private fun List<TranscriptSegment>.toSentencesInternal(
         val rawSentences = trimmed.split(regex).filter { it.isNotBlank() }
         if (rawSentences.isEmpty()) continue
 
-        val aligned = if (precomputedEnergy != null && precomputedEnergy.isNotEmpty()) {
+        val aligned = if ((precomputedEnergy != null && precomputedEnergy.isNotEmpty()) || seg.words.isNotEmpty()) {
             AcousticAligner.alignSentencesWithEnergy(
                 rawSentences = rawSentences,
                 startMs = seg.startMs,
                 endMs = seg.endMs,
-                energy = precomputedEnergy,
+                energy = precomputedEnergy ?: FloatArray(0),
                 speaker = seg.speaker,
                 words = seg.words
             )
