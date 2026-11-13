@@ -5,7 +5,7 @@ Transcriber is an offline-first, privacy-focused Android application designed fo
 
 ---
 
-## 2. Near-Term Feature Set & Current Version (`v0.80`)
+## 2. Near-Term Feature Set & Current Version (`v0.81`)
 - **Native C++ Engine:** Powered by Scrib's C++ `transcribe.cpp` / `whisper.cpp` / `ggml` runtime.
 - **Sentence-Boundary Paragraph Breaking:** Automatically breaks paragraphs at sentence-ending punctuation (`.?!`) when the configurable word threshold is reached (default 70 words, adjustable from 20 to 200 words in Settings).
 - **Intelligent Sentence Fragment Merger:** Automatically attaches short, lowercase sentence fragments ($\le 2$ words, e.g. `"examples."`) to parent sentences before paragraph breaks.
