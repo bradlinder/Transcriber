@@ -221,18 +221,19 @@ class GgmlTranscriptionEngine(private val appContext: Context) : TranscriptionEn
         onProgress: (Int) -> Unit,
         onPartial: (String) -> Unit
     ): List<TranscriptSegment> {
-        val windows = (audio.sampleCount + window - 1) / window
-        val segments = ArrayList<TranscriptSegment>(windows)
+        val windowPlan = planAcousticWindows(audio, window)
+        val segments = ArrayList<TranscriptSegment>(windowPlan.size)
         val cumulative = StringBuilder()
-        for (i in 0 until windows) {
+        var previousPrompt: String? = null
+        for ((offset, length) in windowPlan) {
             if (cancellation.isCancelled) {
                 throw CancelledException()
             }
-            val offset = i * window
-            val length = minOf(window, audio.sampleCount - offset)
-            onProgress(i * 100 / windows)
+            onProgress((offset.toLong() * 100L / audio.sampleCount).toInt())
+            val prompt = if (info.contextPrompt) previousPrompt else null
             val result = runUtterance(
                 live, info, audio, offset, length, language, abort,
+                prompt = prompt,
                 onPartial = { partial ->
                     cumulative.append(partial)
                     onPartial(cumulative.toString())
@@ -247,8 +248,27 @@ class GgmlTranscriptionEngine(private val appContext: Context) : TranscriptionEn
             }) {
                 segments.add(if (segments.isEmpty()) segment else segment.copy(text = " ${segment.text}"))
             }
+            val trimmedResult = result.text.trim()
+            if (trimmedResult.isNotEmpty()) {
+                previousPrompt = trimmedResult.takeLast(CONTEXT_PROMPT_MAX_CHARS)
+            }
         }
         return markParagraphs(segments, emptyList())
+    }
+
+    private fun planAcousticWindows(audio: RunAudio, maxWindowSamples: Int): List<Pair<Int, Int>> {
+        if (audio.sampleCount <= maxWindowSamples) {
+            return listOf(0 to audio.sampleCount)
+        }
+        val energy = audio.computeEnergyProfile(SAMPLE_RATE)
+        val rawRanges = AcousticAligner.planPauseSnappedWindowRanges(
+            totalSamples = audio.sampleCount,
+            maxWindowSamples = maxWindowSamples,
+            minWindowSamples = minOf(maxWindowSamples, MIN_WINDOW_SAMPLES),
+            energy = energy,
+            sampleRate = SAMPLE_RATE
+        )
+        return rawRanges.map { (start, end) -> start to (end - start) }
     }
 
     private fun runAudio(pcm: DecodedAudio, info: TranscribeModelInfo): RunAudio {
@@ -284,14 +304,15 @@ class GgmlTranscriptionEngine(private val appContext: Context) : TranscriptionEn
         length: Int,
         language: String?,
         abort: TranscribeAbort,
-        onPartial: ((String) -> Unit)? = null
+        onPartial: ((String) -> Unit)? = null,
+        prompt: String? = null
     ): RunResult {
         val samples = audio.slice(offset, length)
         if (!info.streaming) {
-            TranscribeSession.check(live.run(samples, length, language, null, false, abort))
+            TranscribeSession.check(live.run(samples, length, language, prompt, false, abort))
             return RunResult(live.fullText.orEmpty(), live.segments())
         }
-        live.streamBegin(language, null, false, abort)
+        live.streamBegin(language, prompt, false, abort)
         try {
             live.streamFeed(samples, length)
             live.streamFinalize()
@@ -380,6 +401,50 @@ class GgmlTranscriptionEngine(private val appContext: Context) : TranscriptionEn
             return view.slice().order(ByteOrder.nativeOrder())
         }
 
+        fun computeEnergyProfile(sampleRate: Int = SAMPLE_RATE): FloatArray {
+            val frameLen = (AcousticAligner.FRAME_LEN_MS * sampleRate) / 1000
+            val frameShift = (AcousticAligner.FRAME_SHIFT_MS * sampleRate) / 1000
+            val numFrames = maxOf(0, (sampleCount - frameLen) / frameShift + 1)
+            if (numFrames == 0) return FloatArray(0)
+
+            val rawEnergy = FloatArray(numFrames)
+            val blockFrames = 500
+            val floats = samples.duplicate().apply {
+                position(0)
+                limit(sampleCount * 4)
+            }.order(ByteOrder.nativeOrder()).asFloatBuffer()
+            val scratch = FloatArray((blockFrames - 1) * frameShift + frameLen)
+
+            var frameOffset = 0
+            while (frameOffset < numFrames) {
+                val count = minOf(blockFrames, numFrames - frameOffset)
+                val firstSample = frameOffset * frameShift
+                val neededSamples = minOf(sampleCount - firstSample, (count - 1) * frameShift + frameLen)
+                floats.position(firstSample)
+                floats.get(scratch, 0, neededSamples)
+                for (k in 0 until count) {
+                    val base = k * frameShift
+                    var sumSq = 0.0f
+                    val limit = minOf(frameLen, neededSamples - base)
+                    for (i in 0 until limit) {
+                        val s = scratch[base + i]
+                        sumSq += s * s
+                    }
+                    rawEnergy[frameOffset + k] = if (limit > 0) sumSq / limit else 0.0f
+                }
+                frameOffset += count
+            }
+
+            val smoothed = FloatArray(numFrames)
+            for (f in 0 until numFrames) {
+                val prev = if (f > 0) rawEnergy[f - 1] else rawEnergy[f]
+                val curr = rawEnergy[f]
+                val next = if (f + 1 < numFrames) rawEnergy[f + 1] else rawEnergy[f]
+                smoothed[f] = 0.25f * prev + 0.5f * curr + 0.25f * next
+            }
+            return smoothed
+        }
+
         private fun assembleBpeTokensToWords(
             tokens: List<TranscribeTokenData>,
             offsetMs: Long,
@@ -391,13 +456,23 @@ class GgmlTranscriptionEngine(private val appContext: Context) : TranscriptionEn
             val currentWord = StringBuilder()
             var wordStartMs = -1L
             var wordEndMs = -1L
+            var pendingWordBreak = false
 
             for (tok in tokens) {
                 val rawText = tok.text
-                if (rawText.isBlank()) continue
+                if (rawText.isBlank()) {
+                    if (rawText.isNotEmpty()) {
+                        pendingWordBreak = true
+                    }
+                    continue
+                }
 
-                // BPE / SentencePiece tokens that start new words begin with space, SentencePiece indicator (\u2581), or newline
-                val startsNewWord = rawText.startsWith(" ") || rawText.startsWith("\u2581") || rawText.startsWith("\n") || currentWord.isEmpty()
+                // BPE / SentencePiece tokens that start new words begin with space, SentencePiece indicator (\u2581), newline, or follow a whitespace-only token
+                val startsNewWord = pendingWordBreak ||
+                    rawText.startsWith(" ") ||
+                    rawText.startsWith("\u2581") ||
+                    rawText.startsWith("\n") ||
+                    currentWord.isEmpty()
 
                 if (startsNewWord && currentWord.isNotEmpty()) {
                     val fullWord = replace(currentWord.toString()).trim()
@@ -407,6 +482,7 @@ class GgmlTranscriptionEngine(private val appContext: Context) : TranscriptionEn
                     currentWord.clear()
                     wordStartMs = -1L
                 }
+                pendingWordBreak = false
 
                 val cleanTok = rawText.removePrefix("\u2581").trimStart()
                 val tokStart = offsetMs + tok.startMs
@@ -444,25 +520,30 @@ class GgmlTranscriptionEngine(private val appContext: Context) : TranscriptionEn
 
             val segments = result.segments.filter { it.text.isNotBlank() }
             if (segments.isEmpty()) {
+                val replacedText = replace(result.text)
+                val segStart = originalMs(offset)
+                val segEnd = originalMs(offset + length)
                 return listOf(
                     TranscriptSegment(
-                        originalMs(offset),
-                        originalMs(offset + length),
-                        replace(result.text),
-                        words = timedWords
+                        segStart,
+                        segEnd,
+                        replacedText,
+                        words = AcousticAligner.reconcileWordsWithSegmentText(replacedText, timedWords, segStart, segEnd)
                     )
                 )
             }
-            return segments.map { segment ->
-                val from = offsetMs + segment.startMs
-                val to = offsetMs + segment.endMs
-                val segStart = originalMsAt(from)
-                val segEnd = originalMsAt(to)
-                val segWords = timedWords.filter { w -> w.startMs >= segStart - 100L && w.endMs <= segEnd + 100L }
+            val segBounds = segments.map { seg ->
+                originalMsAt(offsetMs + seg.startMs) to originalMsAt(offsetMs + seg.endMs)
+            }
+            val partitionedWords = AcousticAligner.assignTimedWordsExclusively(timedWords, segBounds)
+            return segments.mapIndexed { idx, segment ->
+                val (segStart, segEnd) = segBounds[idx]
+                val replacedText = replace(segment.text)
+                val segWords = AcousticAligner.reconcileWordsWithSegmentText(replacedText, partitionedWords[idx], segStart, segEnd)
                 TranscriptSegment(
                     segStart,
                     segEnd,
-                    replace(segment.text),
+                    replacedText,
                     words = segWords
                 )
             }
@@ -531,5 +612,7 @@ class GgmlTranscriptionEngine(private val appContext: Context) : TranscriptionEn
         const val SAMPLE_RATE = 16000
 
         const val WINDOW_SAMPLES = SAMPLE_RATE * 30
+        const val MIN_WINDOW_SAMPLES = SAMPLE_RATE * 24
+        const val CONTEXT_PROMPT_MAX_CHARS = 220
     }
 }

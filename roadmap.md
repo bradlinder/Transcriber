@@ -5,7 +5,7 @@ Transcriber is an offline-first, privacy-focused Android application designed fo
 
 ---
 
-## 2. Near-Term Feature Set & Current Version (`v0.66`)
+## 2. Near-Term Feature Set & Current Version (`v0.68`)
 - **Native C++ Engine:** Powered by Scrib's C++ `transcribe.cpp` / `whisper.cpp` / `ggml` runtime.
 - **Sentence-Boundary Paragraph Breaking:** Automatically breaks paragraphs at sentence-ending punctuation (`.?!`) when the configurable word threshold is reached (default 70 words, adjustable from 20 to 200 words in Settings).
 - **Intelligent Sentence Fragment Merger:** Automatically attaches short, lowercase sentence fragments ($\le 2$ words, e.g. `"examples."`) to parent sentences before paragraph breaks.
@@ -317,6 +317,17 @@ Transcriber is an offline-first, privacy-focused Android application designed fo
   - Uniform Multi-Window Averaging: Slices all turns >= 1.2s into 1.5s sliding windows (0.75s step) to average CAM++ voiceprint embeddings and cancel transient codec jitter.
   - Elimination of Single-Soundbite Outlier Erasure: Replaced the 1-chunk cluster suppression rule with duration-grounded preservation (>= 1.0s) so brief guest remarks and Zoom quotes are never collapsed into other speakers.
   - Average Linkage (UPGMA) & Adaptive Dendrogram Gap Detection: Switched from centroid gravitational merging to unweighted pairwise average distance with adaptive knee-point acceleration stopping in Auto mode.
+
+### [x] Priority 47 (COMPLETED in v0.67): Pause-Snapped Windowing & Lossless Neural Word Alignment
+- **Overview:**
+  - STE Pause-Snapped Chunking: Replaced rigid 30.000s non-overlapping cuts in `GgmlTranscriptionEngine` with Short-Time Energy pause-snapped windows (`24s–30s`) and context prompt carry-over, preventing mid-word and mid-clause losses at window boundaries.
+  - Exclusive Neural Word Partitioning: Eliminated `±100ms` boundary filtering drops and duplicate edge words across `GgmlTranscriptionEngine` and `AcousticAligner` via deterministic max-overlap assignment and sequential sentence partitioning.
+  - Whitespace-Preserving Token Assembly: Preserved standalone whitespace tokens in `TranscribeLib.tokens()` and reconciled token timings against canonical segment text so BPE/SentencePiece subwords never glue adjacent words together.
+
+### [x] Priority 48 (COMPLETED in v0.68): GitHub Actions CI APK Build Workflow & Cross-Platform Gradle Fix
+- **Overview:**
+  - Added `.github/workflows/build-apk.yml` to build signed `release` or `debug` APKs directly from `main` (on push to Android sources or manual `workflow_dispatch`), run unit tests, and publish downloadable `.apk` artifacts without requiring release tags or private signing secrets.
+  - Replaced the Windows-hardcoded Chaquopy `buildPython` path in `app/build.gradle` with cross-platform OS detection and `-Pchaquopy.buildPython` support.
 
 ---
 

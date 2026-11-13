@@ -232,7 +232,7 @@ class TranscribeSession internal constructor(private var ptr: Long, private val 
         val bounds = TranscribeLib.nativeTokenBounds(ptr)
         val tokens = ArrayList<TranscribeTokenData>(count)
         for (i in 0 until count) {
-            val text = TranscribeLib.nativeTokenText(ptr, i)?.takeIf { it.isNotBlank() } ?: continue
+            val text = TranscribeLib.nativeTokenText(ptr, i)?.takeIf { it.isNotEmpty() } ?: continue
             val t0 = if (i * 2 + 1 < bounds.size) bounds[i * 2] else 0L
             val t1 = if (i * 2 + 1 < bounds.size) bounds[i * 2 + 1] else 0L
             tokens.add(TranscribeTokenData(t0, t1, text))

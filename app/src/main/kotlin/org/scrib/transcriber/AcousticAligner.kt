@@ -212,7 +212,70 @@ object AcousticAligner {
         val filtered = rawSentences.map { it.trim() }.filter { it.isNotBlank() }
         if (filtered.isEmpty()) return emptyList()
 
-        val allWords = if (words.isNotEmpty()) words else if (energy.isNotEmpty()) alignWords(rawSentences.joinToString(" "), startMs, endMs, energy) else emptyList()
+        if (words.isNotEmpty()) {
+            if (filtered.size == 1) {
+                val baseSpan = if (energy.isNotEmpty()) trimSpeechBounds(energy, startMs, endMs) else TimedSpan(startMs, endMs)
+                val sStart = min(baseSpan.startMs, words.first().startMs)
+                val sEnd = max(baseSpan.endMs, words.last().endMs)
+                return listOf(
+                    TimedSentence(
+                        startMs = sStart,
+                        endMs = max(sStart, sEnd),
+                        text = filtered[0],
+                        speaker = speaker,
+                        words = words
+                    )
+                )
+            }
+
+            val partitioned = partitionNeuralWordsAcrossSentences(filtered, words)
+            val result = ArrayList<TimedSentence>(filtered.size)
+            var fallbackCursorMs = min(startMs, words.first().startMs)
+            val maxBoundMs = max(endMs, words.last().endMs)
+
+            for (i in filtered.indices) {
+                val sWords = partitioned[i]
+                if (sWords.isNotEmpty()) {
+                    val sStart = sWords.first().startMs
+                    val sEnd = max(sStart, sWords.last().endMs)
+                    result.add(
+                        TimedSentence(
+                            startMs = sStart,
+                            endMs = sEnd,
+                            text = filtered[i],
+                            speaker = speaker,
+                            words = sWords
+                        )
+                    )
+                    fallbackCursorMs = max(fallbackCursorMs, sEnd)
+                } else {
+                    val sStart = fallbackCursorMs
+                    val nextAnchor = (i + 1 until filtered.size)
+                        .firstOrNull { partitioned[it].isNotEmpty() }
+                        ?.let { partitioned[it].first().startMs }
+                        ?: maxBoundMs
+                    val sEnd = max(sStart + 50L, min(maxBoundMs, nextAnchor))
+                    val fallbackWords = if (energy.isNotEmpty()) {
+                        alignWords(filtered[i], sStart, sEnd, energy)
+                    } else {
+                        alignWords(filtered[i], sStart, sEnd, FloatArray(0))
+                    }
+                    result.add(
+                        TimedSentence(
+                            startMs = sStart,
+                            endMs = sEnd,
+                            text = filtered[i],
+                            speaker = speaker,
+                            words = fallbackWords
+                        )
+                    )
+                    fallbackCursorMs = sEnd
+                }
+            }
+            return result
+        }
+
+        val allWords = if (energy.isNotEmpty()) alignWords(filtered.joinToString(" "), startMs, endMs, energy) else emptyList()
 
         if (energy.isEmpty()) {
             val duration = maxOf(1L, endMs - startMs)
@@ -272,17 +335,85 @@ object AcousticAligner {
         for (i in filtered.indices) {
             val sStart = boundaries[i]
             val sEnd = max(sStart + 100L, boundaries[i + 1])
-            val sWords = allWords.filter { w -> w.startMs >= sStart - 100L && w.endMs <= sEnd + 100L }
-            val finalWords = if (sWords.isNotEmpty()) sWords else alignWords(filtered[i], sStart, sEnd, energy)
+            val sWords = alignWords(filtered[i], sStart, sEnd, energy)
             result.add(
                 TimedSentence(
                     startMs = sStart,
                     endMs = sEnd,
                     text = filtered[i],
                     speaker = speaker,
-                    words = finalWords
+                    words = sWords
                 )
             )
+        }
+        return result
+    }
+
+    /**
+     * Partitions neural TimedWords sequentially and exhaustively across sentences so zero words
+     * are dropped or duplicated at sentence boundaries even when speaking rates vary across turns.
+     */
+    internal fun partitionNeuralWordsAcrossSentences(
+        sentences: List<String>,
+        words: List<TimedWord>
+    ): List<List<TimedWord>> {
+        val result = List(sentences.size) { mutableListOf<TimedWord>() }
+        if (sentences.isEmpty() || words.isEmpty()) return result
+        if (sentences.size == 1) {
+            result[0].addAll(words)
+            return result
+        }
+
+        val whitespaceRegex = Regex("""\s+""")
+        val sentenceWordCounts = sentences.map { s ->
+            s.trim().split(whitespaceRegex).count { it.isNotBlank() }
+        }
+        if (sentenceWordCounts.sum() == words.size) {
+            var cursor = 0
+            for (i in sentences.indices) {
+                val count = sentenceWordCounts[i]
+                for (k in 0 until count) {
+                    result[i].add(words[cursor++])
+                }
+            }
+            return result
+        }
+
+        fun nonSpaceLen(s: String): Int {
+            var c = 0
+            for (ch in s) if (!ch.isWhitespace()) c++
+            return maxOf(1, c)
+        }
+
+        val totalSentenceChars = sentences.sumOf { nonSpaceLen(it) }.coerceAtLeast(1)
+        val totalWordChars = words.sumOf { nonSpaceLen(it.word) }.coerceAtLeast(1)
+
+        var wordCursor = 0
+        var accSentenceChars = 0
+        var accWordChars = 0
+
+        for (i in sentences.indices) {
+            accSentenceChars += nonSpaceLen(sentences[i])
+            if (i == sentences.lastIndex) {
+                while (wordCursor < words.size) {
+                    result[i].add(words[wordCursor++])
+                }
+                break
+            }
+
+            val targetWordChars = (accSentenceChars.toDouble() * totalWordChars / totalSentenceChars)
+            while (wordCursor < words.size) {
+                val wLen = nonSpaceLen(words[wordCursor].word)
+                val distWithout = abs(accWordChars - targetWordChars)
+                val distWith = abs((accWordChars + wLen) - targetWordChars)
+                if (distWith <= distWithout || (result[i].isEmpty() && wordCursor < words.size - (sentences.lastIndex - i))) {
+                    result[i].add(words[wordCursor])
+                    accWordChars += wLen
+                    wordCursor++
+                } else {
+                    break
+                }
+            }
         }
         return result
     }
@@ -428,6 +559,190 @@ object AcousticAligner {
             words = rightWords
         )
         return listOf(seg1, seg2)
+    }
+
+    /**
+     * Plans [startSample, endSample) windows of length <= maxWindowSamples, snapping non-final cuts
+     * to the lowest-energy Short-Time Energy acoustic pause inside [minWindowSamples, maxWindowSamples]
+     * instead of slicing mid-word at rigid 30.000s intervals.
+     */
+    fun planPauseSnappedWindowRanges(
+        totalSamples: Int,
+        maxWindowSamples: Int,
+        minWindowSamples: Int,
+        energy: FloatArray,
+        sampleRate: Int = 16000
+    ): List<Pair<Int, Int>> {
+        if (totalSamples <= 0) return emptyList()
+        if (totalSamples <= maxWindowSamples || maxWindowSamples <= 0) {
+            return listOf(0 to totalSamples)
+        }
+
+        val safeMinWindow = minWindowSamples.coerceIn(1, maxWindowSamples)
+        val ranges = mutableListOf<Pair<Int, Int>>()
+        var offset = 0
+
+        while (offset < totalSamples) {
+            val remaining = totalSamples - offset
+            if (remaining <= maxWindowSamples) {
+                ranges.add(offset to totalSamples)
+                break
+            }
+
+            val minEndSample = offset + safeMinWindow
+            val maxEndSample = offset + maxWindowSamples
+            var cutSample = maxEndSample
+
+            if (energy.isNotEmpty() && maxEndSample > minEndSample) {
+                val minBoundMs = minEndSample.toLong() * 1000L / sampleRate
+                val maxBoundMs = maxEndSample.toLong() * 1000L / sampleRate
+                val nominalMs = (minBoundMs + maxBoundMs) / 2L
+                val searchWindowMs = (maxBoundMs - minBoundMs) / 2L + 100L
+                val snappedMs = snapToAcousticPause(
+                    energy = energy,
+                    nominalMs = nominalMs,
+                    minBoundMs = minBoundMs,
+                    maxBoundMs = maxBoundMs,
+                    searchWindowMs = searchWindowMs
+                )
+                cutSample = ((snappedMs * sampleRate) / 1000L).toInt().coerceIn(minEndSample, maxEndSample)
+            }
+
+            ranges.add(offset to cutSample)
+            offset = cutSample
+        }
+        return ranges
+    }
+
+    /**
+     * Assigns every TimedWord deterministically to the single segment with maximum temporal overlap
+     * (falling back to nearest segment distance while preserving monotonic order), eliminating
+     * +/-100ms boundary drops and adjacent-segment word duplications.
+     */
+    fun assignTimedWordsExclusively(
+        words: List<TimedWord>,
+        segmentBounds: List<Pair<Long, Long>>
+    ): List<List<TimedWord>> {
+        val result = List(segmentBounds.size) { mutableListOf<TimedWord>() }
+        if (words.isEmpty() || segmentBounds.isEmpty()) return result
+        if (segmentBounds.size == 1) {
+            result[0].addAll(words)
+            return result
+        }
+
+        var minSegIdx = 0
+        for (w in words) {
+            val midMs = (w.startMs + w.endMs) / 2L
+            var bestIdx = minSegIdx
+            var bestOverlap = -1L
+            var bestDist = Long.MAX_VALUE
+
+            for (i in minSegIdx until segmentBounds.size) {
+                val (sStart, sEnd) = segmentBounds[i]
+                val overlap = minOf(w.endMs, sEnd) - maxOf(w.startMs, sStart)
+                if (overlap > 0L) {
+                    if (overlap > bestOverlap) {
+                        bestOverlap = overlap
+                        bestIdx = i
+                    }
+                } else if (bestOverlap <= 0L) {
+                    val dist = when {
+                        midMs < sStart -> sStart - midMs
+                        midMs > sEnd -> midMs - sEnd
+                        else -> 0L
+                    }
+                    if (dist < bestDist) {
+                        bestDist = dist
+                        bestIdx = i
+                    }
+                }
+            }
+            result[bestIdx].add(w)
+            minSegIdx = bestIdx
+        }
+        return result
+    }
+
+    /**
+     * Reconciles neural word timings against a segment's canonical whitespace-delimited words.
+     * Prevents glued BPE/SentencePiece tokens (e.g. missing spaces after punctuation) from propagating
+     * downstream while preserving exact neural token timestamps for every word.
+     */
+    fun reconcileWordsWithSegmentText(
+        segmentText: String,
+        timedWords: List<TimedWord>,
+        segStartMs: Long,
+        segEndMs: Long
+    ): List<TimedWord> {
+        val textWords = segmentText.trim().split(Regex("""\s+""")).filter { it.isNotBlank() }
+        if (textWords.isEmpty() || timedWords.isEmpty()) return timedWords
+
+        if (textWords.size == timedWords.size) {
+            return textWords.mapIndexed { i, tw -> timedWords[i].copy(word = tw) }
+        }
+
+        fun nonSpaceLen(s: String): Int {
+            var c = 0
+            for (ch in s) if (!ch.isWhitespace()) c++
+            return maxOf(1, c)
+        }
+
+        val tokenStarts = IntArray(timedWords.size)
+        val tokenEnds = IntArray(timedWords.size)
+        var totalTokChars = 0
+        for (i in timedWords.indices) {
+            tokenStarts[i] = totalTokChars
+            totalTokChars += nonSpaceLen(timedWords[i].word)
+            tokenEnds[i] = totalTokChars
+        }
+
+        val totalTextChars = textWords.sumOf { nonSpaceLen(it) }.coerceAtLeast(1)
+        val out = ArrayList<TimedWord>(textWords.size)
+        var textCursor = 0
+        var tokHint = 0
+
+        for (tw in textWords) {
+            val twLen = nonSpaceLen(tw)
+            val qStart = (textCursor.toDouble() * totalTokChars / totalTextChars)
+            val qEnd = ((textCursor + twLen).toDouble() * totalTokChars / totalTextChars)
+
+            while (tokHint + 1 < timedWords.size && tokenEnds[tokHint] <= qStart) {
+                tokHint++
+            }
+
+            var firstTok = tokHint
+            var lastTok = tokHint
+            for (j in tokHint until timedWords.size) {
+                if (tokenStarts[j] < qEnd && tokenEnds[j] > qStart) {
+                    if (j < firstTok) firstTok = j
+                    lastTok = j
+                } else if (tokenStarts[j] >= qEnd) {
+                    break
+                }
+            }
+
+            val tStart = timedWords[firstTok].startMs
+            val tEnd = timedWords[lastTok].endMs
+            val wordStart: Long
+            val wordEnd: Long
+            if (firstTok == lastTok && tokenEnds[firstTok] > tokenStarts[firstTok]) {
+                val tokSpanChars = (tokenEnds[firstTok] - tokenStarts[firstTok]).toDouble()
+                val relStart = ((qStart - tokenStarts[firstTok]) / tokSpanChars).coerceIn(0.0, 1.0)
+                val relEnd = ((qEnd - tokenStarts[firstTok]) / tokSpanChars).coerceIn(relStart, 1.0)
+                val tokDur = maxOf(0L, tEnd - tStart)
+                wordStart = tStart + (tokDur * relStart).toLong()
+                wordEnd = maxOf(wordStart, tStart + (tokDur * relEnd).toLong())
+            } else {
+                wordStart = tStart
+                wordEnd = maxOf(tStart, tEnd)
+            }
+
+            val clampedStart = wordStart.coerceIn(segStartMs, maxOf(segStartMs, segEndMs))
+            val clampedEnd = wordEnd.coerceAtLeast(clampedStart)
+            out.add(TimedWord(tw, clampedStart, clampedEnd))
+            textCursor += twLen
+        }
+        return out
     }
 }
 

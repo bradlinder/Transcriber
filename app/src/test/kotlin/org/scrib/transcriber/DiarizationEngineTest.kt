@@ -726,4 +726,140 @@ class DiarizationEngineTest {
         assertNotEquals("Guest soundbite (Speaker C) must not be merged into Speaker A", labels[0], labels[8])
         assertNotEquals("Guest soundbite (Speaker C) must not be merged into Speaker B", labels[4], labels[8])
     }
+
+    @Test
+    fun testAlignSentencesWithEnergyPreservesAllNeuralWordsWithoutBoundaryDropsOrDuplicates() {
+        val sampleRate = 16000
+        val samples = FloatArray(10 * sampleRate)
+        // Energy concentrated around 1.0s - 8.5s (leaving 0..1s and 8.5..10s quiet)
+        for (i in (1.0 * sampleRate).toInt() until (8.5 * sampleRate).toInt()) {
+            samples[i] = (kotlin.math.sin(2.0 * Math.PI * 300.0 * i / sampleRate) * 0.5).toFloat()
+        }
+
+        // First sentence is spoken quickly in 1.2s; second sentence is spoken slowly over 7.2s.
+        // Character-proportion boundary + +/-100ms filtering would drop or duplicate boundary words.
+        val neuralWords = listOf(
+            AcousticAligner.TimedWord("So", 900L, 1060L),
+            AcousticAligner.TimedWord("that", 1060L, 1220L),
+            AcousticAligner.TimedWord("combination", 1220L, 1620L),
+            AcousticAligner.TimedWord("really", 1620L, 1860L),
+            AcousticAligner.TimedWord("appealed", 1860L, 2100L),
+            AcousticAligner.TimedWord("to", 2100L, 2180L),
+            AcousticAligner.TimedWord("me.", 2180L, 2340L),
+            AcousticAligner.TimedWord("Were", 3500L, 3800L),
+            AcousticAligner.TimedWord("your", 4200L, 4600L),
+            AcousticAligner.TimedWord("colleagues", 5000L, 6200L),
+            AcousticAligner.TimedWord("shocked", 6500L, 7800L),
+            AcousticAligner.TimedWord("yesterday?", 8200L, 9400L)
+        )
+
+        val aligned = AcousticAligner.alignSentences(
+            rawSentences = listOf(
+                "So that combination really appealed to me.",
+                "Were your colleagues shocked yesterday?"
+            ),
+            startMs = 0L,
+            endMs = 10000L,
+            samples = samples,
+            sampleRate = sampleRate,
+            words = neuralWords
+        )
+
+        assertEquals(2, aligned.size)
+        val reconstructed = aligned.flatMap { it.words }.map { it.word }
+        assertEquals(
+            "Every single neural word including quiet edges must be preserved once with zero duplicates",
+            neuralWords.map { it.word },
+            reconstructed
+        )
+        assertEquals("me.", aligned[0].words.last().word)
+        assertEquals("Were", aligned[1].words.first().word)
+    }
+
+    @Test
+    fun testPlanPauseSnappedWindowRangesSnapsToSilenceValley() {
+        val sampleRate = 16000
+        val totalSeconds = 50
+        val samples = FloatArray(totalSeconds * sampleRate) { i ->
+            (kotlin.math.sin(2.0 * Math.PI * 220.0 * i / sampleRate) * 0.45).toFloat()
+        }
+        // Carve a clear 600ms acoustic pause at 26.2s - 26.8s (inside the 24s - 30s search window)
+        val silenceStart = (26.2 * sampleRate).toInt()
+        val silenceEnd = (26.8 * sampleRate).toInt()
+        for (i in silenceStart until silenceEnd) {
+            samples[i] = 0.0f
+        }
+
+        val energy = AcousticAligner.computeEnergyProfile(samples, sampleRate)
+        val ranges = AcousticAligner.planPauseSnappedWindowRanges(
+            totalSamples = samples.size,
+            maxWindowSamples = 30 * sampleRate,
+            minWindowSamples = 24 * sampleRate,
+            energy = energy,
+            sampleRate = sampleRate
+        )
+
+        assertEquals(2, ranges.size)
+        val (firstStart, firstEnd) = ranges[0]
+        val (secondStart, secondEnd) = ranges[1]
+        assertEquals(0, firstStart)
+        assertEquals("Next window must start contiguously at firstEnd", firstEnd, secondStart)
+        assertEquals(samples.size, secondEnd)
+        assertTrue("First window length must stay <= 30s", firstEnd - firstStart <= 30 * sampleRate)
+        assertTrue("First window length must stay >= 24s", firstEnd - firstStart >= 24 * sampleRate)
+        assertTrue(
+            "Cut sample ($firstEnd) should snap inside/near the 26.2s-26.8s pause valley instead of 30.000s",
+            firstEnd in (26.1 * sampleRate).toInt()..(26.9 * sampleRate).toInt()
+        )
+    }
+
+    @Test
+    fun testAssignTimedWordsExclusivelyAvoidsBoundaryDropsAndDuplicates() {
+        val segmentBounds = listOf(
+            0L to 2000L,
+            2000L to 4000L,
+            4000L to 6000L
+        )
+        // Includes a boundary-straddling word (1950..2090 -> majority in seg 1), a short fast word
+        // slightly past segment 0 end, and zero-gap adjacent words.
+        val words = listOf(
+            AcousticAligner.TimedWord("So", 0L, 200L),
+            AcousticAligner.TimedWord("director", 1500L, 1950L),
+            AcousticAligner.TimedWord("Zane", 1950L, 2120L),
+            AcousticAligner.TimedWord("told", 2120L, 2400L),
+            AcousticAligner.TimedWord("them", 3980L, 4200L),
+            AcousticAligner.TimedWord("now.", 4200L, 4600L)
+        )
+
+        val assigned = AcousticAligner.assignTimedWordsExclusively(words, segmentBounds)
+        assertEquals(3, assigned.size)
+        assertEquals(listOf("So", "director"), assigned[0].map { it.word })
+        assertEquals(listOf("Zane", "told"), assigned[1].map { it.word })
+        assertEquals(listOf("them", "now."), assigned[2].map { it.word })
+        assertEquals(
+            "Every word must appear exactly once across segments",
+            words.map { it.word },
+            assigned.flatten().map { it.word }
+        )
+    }
+
+    @Test
+    fun testReconcileWordsWithSegmentTextSplitsGluedTokens() {
+        val gluedWords = listOf(
+            AcousticAligner.TimedWord("So", 100L, 300L),
+            AcousticAligner.TimedWord("essentially,", 300L, 700L),
+            AcousticAligner.TimedWord("director,Zane", 700L, 1200L)
+        )
+
+        val reconciled = AcousticAligner.reconcileWordsWithSegmentText(
+            segmentText = "So essentially, director, Zane",
+            timedWords = gluedWords,
+            segStartMs = 100L,
+            segEndMs = 1200L
+        )
+
+        assertEquals(listOf("So", "essentially,", "director,", "Zane"), reconciled.map { it.word })
+        assertTrue(reconciled[2].startMs >= 700L && reconciled[2].endMs > reconciled[2].startMs)
+        assertTrue(reconciled[3].startMs >= reconciled[2].endMs && reconciled[3].endMs <= 1200L)
+    }
 }
