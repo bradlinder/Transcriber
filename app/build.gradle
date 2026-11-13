@@ -34,8 +34,8 @@ android {
         applicationId "org.scrib.transcriber${suffix}"
         minSdk 26
         targetSdk 35
-        versionCode 68
-        versionName '0.68'
+        versionCode 70
+        versionName '0.70'
 
         resValue 'string', 'app_name', appName
 

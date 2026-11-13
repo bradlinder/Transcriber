@@ -5,7 +5,7 @@ Transcriber is an offline-first, privacy-focused Android application designed fo
 
 ---
 
-## 2. Near-Term Feature Set & Current Version (`v0.68`)
+## 2. Near-Term Feature Set & Current Version (`v0.70`)
 - **Native C++ Engine:** Powered by Scrib's C++ `transcribe.cpp` / `whisper.cpp` / `ggml` runtime.
 - **Sentence-Boundary Paragraph Breaking:** Automatically breaks paragraphs at sentence-ending punctuation (`.?!`) when the configurable word threshold is reached (default 70 words, adjustable from 20 to 200 words in Settings).
 - **Intelligent Sentence Fragment Merger:** Automatically attaches short, lowercase sentence fragments ($\le 2$ words, e.g. `"examples."`) to parent sentences before paragraph breaks.
@@ -328,6 +328,16 @@ Transcriber is an offline-first, privacy-focused Android application designed fo
 - **Overview:**
   - Added `.github/workflows/build-apk.yml` to build signed `release` or `debug` APKs directly from `main` (on push to Android sources or manual `workflow_dispatch`), run unit tests, and publish downloadable `.apk` artifacts without requiring release tags or private signing secrets.
   - Replaced the Windows-hardcoded Chaquopy `buildPython` path in `app/build.gradle` with cross-platform OS detection and `-Pchaquopy.buildPython` support.
+
+### [x] Priority 49 (COMPLETED in v0.69): VAD Speech Retention & Temporal Speaker Flicker Elimination
+- **Overview:**
+  - Tuned Silero VAD (`TranscribeVad`: `THRESHOLD=0.25f`, `MIN_SPEECH_MS=100`, `MIN_SILENCE_MS=500`, `SPEECH_PAD_MS=250`) and bridged short pauses (`<= 350ms`) with an 85% active-speech compaction bypass in `GgmlTranscriptionEngine` so quiet/off-mic words are never excised before ASR.
+  - Eliminated phantom 1-2 word trailing speaker splits in `DiarizationEngine` via cohesive 0.8s–6.0s turn embeddings, full-width 3.0s tail windows for >= 6.0s turns, raising the Auto AHC knee-point floor (`0.55f`), and `smoothShortSpeakerRuns` (< 650ms neural token duration).
+
+### [x] Priority 50 (COMPLETED in v0.70): GitHub Release Publishing Workflow Alignment
+- **Overview:**
+  - Updated `.github/workflows/build-apk.yml` with `permissions: contents: write` and a `Publish APK to GitHub Release` step that publishes built `.apk` files directly to both `v<version>` and `latest` GitHub Releases (in addition to Actions artifacts).
+  - Updated `.github/workflows/release.yml` to configure Python 3.12 (`-Pchaquopy.buildPython`), Android SDK API 35 / NDK 27, keystore fallback, and APK verification compatible with `app/build.gradle`.
 
 ---
 

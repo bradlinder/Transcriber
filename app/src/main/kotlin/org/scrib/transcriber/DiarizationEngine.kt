@@ -73,15 +73,28 @@ object DiarizationEngine {
                     val wordTimings = s.words.map { WordTiming(it.word, it.startMs, it.endMs) }
                     val assignments = assignSpeakersToWordTimings(wordTimings, diarizedSpans)
 
-                    var currentSpeaker: String? = null
-                    var segStartMs = s.startMs
-                    val currentWords = mutableListOf<AcousticAligner.TimedWord>()
-
+                    val resolvedSpeakers = ArrayList<String>(s.words.size)
+                    var runningSpeaker: String? = null
                     for (i in assignments.indices) {
                         val assign = assignments[i]
                         val timedWord = s.words[i]
                         val wordSpk = assign.speaker ?: findBestSpeaker(timedWord.startMs, timedWord.endMs, diarizedSpans)
-                        val spk = wordSpk.ifBlank { currentSpeaker ?: s.speaker.ifBlank { findBestSpeaker(s.startMs, s.endMs, diarizedSpans) } }
+                        val spk = wordSpk.ifBlank {
+                            runningSpeaker ?: s.speaker.ifBlank { findBestSpeaker(s.startMs, s.endMs, diarizedSpans) }
+                        }
+                        resolvedSpeakers.add(spk)
+                        if (spk.isNotBlank()) runningSpeaker = spk
+                    }
+
+                    val smoothedSpeakers = smoothShortSpeakerRuns(s.words, resolvedSpeakers)
+
+                    var currentSpeaker: String? = null
+                    var segStartMs = s.startMs
+                    val currentWords = mutableListOf<AcousticAligner.TimedWord>()
+
+                    for (i in s.words.indices) {
+                        val spk = smoothedSpeakers[i]
+                        val timedWord = s.words[i]
 
                         if (currentSpeaker == null) {
                             currentSpeaker = spk
@@ -279,6 +292,82 @@ object DiarizationEngine {
     }
 
 
+    /**
+     * Absorbs transient sub-turn speaker flickers (< minTurnDurationMs based solely on neural
+     * token timestamps) into adjacent speaker runs within the same sentence so single trailing
+     * words never break into phantom speaker turns.
+     */
+    internal fun smoothShortSpeakerRuns(
+        words: List<AcousticAligner.TimedWord>,
+        speakers: List<String>,
+        minTurnDurationMs: Long = 650L
+    ): List<String> {
+        if (words.size <= 1 || words.size != speakers.size) return speakers
+
+        data class Run(val speaker: String, val startIdx: Int, val endIdx: Int)
+
+        val runs = mutableListOf<Run>()
+        var runStart = 0
+        for (i in 1..speakers.size) {
+            if (i == speakers.size || speakers[i] != speakers[runStart]) {
+                runs.add(Run(speakers[runStart], runStart, i))
+                runStart = i
+            }
+        }
+        if (runs.size <= 1) return speakers
+
+        fun runDurationMs(r: Run): Long =
+            max(0L, words[r.endIdx - 1].endMs - words[r.startIdx].startMs)
+
+        while (runs.size > 1) {
+            var shortestIdx = -1
+            var shortestDur = Long.MAX_VALUE
+            for (i in runs.indices) {
+                val dur = runDurationMs(runs[i])
+                if (dur < minTurnDurationMs && dur < shortestDur) {
+                    shortestDur = dur
+                    shortestIdx = i
+                }
+            }
+            if (shortestIdx == -1) break
+
+            val targetIdx = when {
+                shortestIdx == 0 -> 1
+                shortestIdx == runs.lastIndex -> shortestIdx - 1
+                runDurationMs(runs[shortestIdx - 1]) >= runDurationMs(runs[shortestIdx + 1]) -> shortestIdx - 1
+                else -> shortestIdx + 1
+            }
+            val absorbed = runs[shortestIdx]
+            val target = runs[targetIdx]
+            runs[targetIdx] = Run(
+                speaker = target.speaker,
+                startIdx = min(target.startIdx, absorbed.startIdx),
+                endIdx = max(target.endIdx, absorbed.endIdx)
+            )
+            runs.removeAt(shortestIdx)
+
+            // Coalesce any newly adjacent runs sharing the same speaker
+            var j = 0
+            while (j + 1 < runs.size) {
+                if (runs[j].speaker == runs[j + 1].speaker) {
+                    runs[j] = Run(runs[j].speaker, runs[j].startIdx, runs[j + 1].endIdx)
+                    runs.removeAt(j + 1)
+                } else {
+                    j++
+                }
+            }
+        }
+
+        val result = ArrayList<String>(speakers.size)
+        for (i in speakers.indices) result.add(speakers[i])
+        for (r in runs) {
+            for (i in r.startIdx until r.endIdx) {
+                result[i] = r.speaker
+            }
+        }
+        return result
+    }
+
     internal fun findBestSpeaker(startMs: Long, endMs: Long, spans: List<DiarSpan>): String {
         var bestOverlap = 0L
         var bestSpeaker: String? = null
@@ -314,15 +403,20 @@ object DiarizationEngine {
             if (durMs < 800L) {
                 // Short fragments (< 0.8s, like "Yeah.") are isolated to prevent skewing primary clusters
                 shortChunks.add(s)
-            } else if (durMs >= 3000L) {
-                // Window turns >= 3.0s into 2.5s slices with 1.25s hop for stable multi-window voiceprints
+            } else if (durMs >= 6000L) {
+                // Window turns >= 6.0s into full 3.0s slices (1.5s hop) with a full-width aligned tail
+                // so trailing 1.0s silence-heavy stubs cannot form spurious outlier clusters.
                 var currStart = s.startMs
-                while (currStart + 1000L < s.endMs) {
-                    val currEnd = min(currStart + 2500L, s.endMs)
-                    primaryChunks.add(s.copy(startMs = currStart, endMs = currEnd))
-                    currStart += 1250L
+                while (currStart + 3000L < s.endMs) {
+                    primaryChunks.add(s.copy(startMs = currStart, endMs = currStart + 3000L))
+                    currStart += 1500L
+                }
+                val tailStart = max(s.startMs, s.endMs - 3000L)
+                if (primaryChunks.isEmpty() || primaryChunks.last().endMs < s.endMs) {
+                    primaryChunks.add(s.copy(startMs = tailStart, endMs = s.endMs))
                 }
             } else {
+                // Cohesive 0.8s - 6.0s turns use extractSegmentEmbedding (1.5s / 0.75s sub-window centroid)
                 primaryChunks.add(s)
             }
         }
@@ -656,8 +750,9 @@ object DiarizationEngine {
             if (globalMinD > threshold || bestI == -1) break
 
             // Adaptive knee-point detection in Auto mode (minK == 1):
-            // When transitioning from intra-speaker to inter-speaker merges, a distinct distance jump occurs.
-            if (minK == 1 && mergeHistory.size >= 2 && globalMinD > 0.42f) {
+            // Only halt merges below threshold once distance enters the true inter-speaker band (> 0.55f)
+            // so normal intra-speaker pitch/room variation (0.42f-0.55f) still coalesces cleanly.
+            if (minK == 1 && mergeHistory.size >= 2 && globalMinD > 0.55f) {
                 val lastD = mergeHistory.last()
                 val delta = globalMinD - lastD
                 val prevAvgStep = (lastD - mergeHistory.first()) / mergeHistory.size

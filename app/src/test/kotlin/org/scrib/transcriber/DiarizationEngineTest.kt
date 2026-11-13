@@ -862,4 +862,36 @@ class DiarizationEngineTest {
         assertTrue(reconciled[2].startMs >= 700L && reconciled[2].endMs > reconciled[2].startMs)
         assertTrue(reconciled[3].startMs >= reconciled[2].endMs && reconciled[3].endMs <= 1200L)
     }
+
+    @Test
+    fun testSmoothShortSpeakerRunsAbsorbsTrailingWordFlickers() {
+        val words = listOf(
+            AcousticAligner.TimedWord("So", 5680L, 5880L),
+            AcousticAligner.TimedWord("you", 5880L, 6100L),
+            AcousticAligner.TimedWord("have", 6100L, 6400L),
+            AcousticAligner.TimedWord("a", 6400L, 6500L),
+            AcousticAligner.TimedWord("very", 6500L, 6900L),
+            AcousticAligner.TimedWord("impressive", 6900L, 7600L),
+            AcousticAligner.TimedWord("biography.", 8960L, 9500L) // 540ms trailing word flicker
+        )
+        val rawSpeakers = listOf(
+            "Speaker 1", "Speaker 1", "Speaker 1", "Speaker 1", "Speaker 1", "Speaker 1",
+            "Speaker 2"
+        )
+        val smoothed = DiarizationEngine.smoothShortSpeakerRuns(words, rawSpeakers, minTurnDurationMs = 650L)
+        assertEquals(List(7) { "Speaker 1" }, smoothed)
+
+        // Real multi-word turn >= 650ms must stay distinct
+        val multiTurnWords = listOf(
+            AcousticAligner.TimedWord("First", 0L, 400L),
+            AcousticAligner.TimedWord("part", 400L, 900L),
+            AcousticAligner.TimedWord("second", 1200L, 1600L),
+            AcousticAligner.TimedWord("speaker", 1600L, 2100L)
+        )
+        val multiSpeakers = listOf("Speaker 1", "Speaker 1", "Speaker 2", "Speaker 2")
+        assertEquals(
+            multiSpeakers,
+            DiarizationEngine.smoothShortSpeakerRuns(multiTurnWords, multiSpeakers, minTurnDurationMs = 650L)
+        )
+    }
 }

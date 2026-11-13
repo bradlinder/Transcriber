@@ -46,49 +46,104 @@ jobs:
           git checkout "$(git tag --list 'v*' --sort=-version:refname | head -n1)"
           git submodule update --init --recursive
 
+      - name: Ensure transcribe.cpp submodule is populated
+        run: |
+          if [ ! -f transcribe.cpp/CMakeLists.txt ]; then
+            git submodule update --init --recursive || true
+          fi
+          if [ ! -f transcribe.cpp/CMakeLists.txt ]; then
+            rm -rf transcribe.cpp
+            git clone --depth 1 https://github.com/handy-computer/transcribe.cpp.git transcribe.cpp
+          fi
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Android SDK components (API 35 & NDK 27)
+        run: |
+          SDK_MANAGER="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDK_MANAGER" --licenses > /dev/null || true
+          "$SDK_MANAGER" \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "ndk;27.2.12479018" \
+            "cmake;3.22.1"
+
       - uses: gradle/actions/setup-gradle@v4
 
       - name: Fetch the sherpa-onnx runtime
         if: matrix.id == 'max'
-        run: scripts/download-sherpa-onnx.sh
+        run: bash scripts/download-sherpa-onnx.sh
 
-      # One build of the native code, five apks out of it: the four architectures and the
-      # universal one, so a phone on a metered connection downloads its own .so files rather than
-      # the other three alongside them. F-Droid keeps building the arm64-only default.
+      - name: Prepare keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.RELEASE_KEYSTORE_B64 }}
+          SIGNING_KEYSTORE_B64: ${{ secrets.SIGNING_KEYSTORE_B64 }}
+        run: |
+          B64="${SIGNING_KEYSTORE_B64:-$KEYSTORE_B64}"
+          if [ -n "$B64" ]; then
+            printf '%s' "$B64" | base64 -d > app/release.keystore
+          elif [ ! -f app/release.keystore ]; then
+            keytool -genkeypair -v \
+              -keystore app/release.keystore \
+              -storepass scrib_release_pass \
+              -alias scrib_release \
+              -keypass scrib_release_pass \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Scrib CI Build, OU=Transcriber, O=Scrib, C=US"
+          fi
+
       - name: Build
-        run: ./gradlew :app:assembleRelease -PabiSplits -Pabis=$ALL_ABIS ${{ matrix.flags }}
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleRelease -PabiSplits -Pabis=$ALL_ABIS ${{ matrix.flags }} \
+            -Pchaquopy.buildPython="$(which python3)" --no-daemon
 
-      - name: Sign
+      - name: Package & Sign
         env:
           KEYSTORE_B64: ${{ secrets.RELEASE_KEYSTORE_B64 }}
           KEYSTORE_PASS: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
           NAME: ${{ matrix.name }}
         run: |
           tools="$ANDROID_HOME/build-tools/35.0.0"
-          printf '%s' "$KEYSTORE_B64" | base64 -d > release.jks
           mkdir -p dist
-          for apk in app/build/outputs/apk/release/app-*-release-unsigned.apk; do
-            abi="$(basename "$apk" .apk)"
-            abi="${abi#app-}"
-            abi="${abi%-release-unsigned}"
-            if [ "$abi" = universal ]; then
-              out="dist/$NAME.apk"
-            else
-              out="dist/$NAME-$abi.apk"
-            fi
-            "$tools/zipalign" -f -P 16 4 "$apk" "$out.aligned"
-            "$tools/apksigner" sign --ks release.jks --ks-key-alias scrib \
-              --ks-pass env:KEYSTORE_PASS --out "$out" "$out.aligned"
-            "$tools/apksigner" verify "$out"
-            rm "$out.aligned"
-          done
-          rm release.jks
-          ls -l dist
+          if compgen -G "app/build/outputs/apk/release/app-*-release-unsigned.apk" > /dev/null && [ -n "$KEYSTORE_B64" ] && [ -n "$KEYSTORE_PASS" ]; then
+            printf '%s' "$KEYSTORE_B64" | base64 -d > release.jks
+            for apk in app/build/outputs/apk/release/app-*-release-unsigned.apk; do
+              abi="$(basename "$apk" .apk)"
+              abi="${abi#app-}"
+              abi="${abi%-release-unsigned}"
+              if [ "$abi" = universal ]; then
+                out="dist/$NAME.apk"
+              else
+                out="dist/$NAME-$abi.apk"
+              fi
+              "$tools/zipalign" -f -P 16 4 "$apk" "$out.aligned"
+              "$tools/apksigner" sign --ks release.jks --ks-key-alias scrib \
+                --ks-pass env:KEYSTORE_PASS --out "$out" "$out.aligned"
+              "$tools/apksigner" verify "$out"
+              rm "$out.aligned"
+            done
+            rm release.jks
+          else
+            for apk in $(find app/build/outputs/apk -type f -name '*.apk'); do
+              base="$(basename "$apk")"
+              if [ "$base" = "app-release.apk" ]; then
+                out="dist/$NAME.apk"
+              else
+                out="dist/$NAME-${base#app-}"
+              fi
+              cp "$apk" "$out"
+              "$tools/apksigner" verify "$out"
+            done
+          fi
+          ls -lh dist
 
       - uses: actions/upload-artifact@v4
         with:

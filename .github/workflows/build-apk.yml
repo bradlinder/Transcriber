@@ -38,6 +38,13 @@ on:
         description: 'Run JVM unit tests before assembling APK'
         type: boolean
         default: true
+      publish_release:
+        description: 'Publish APK files to GitHub Releases'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
 
 concurrency:
   group: build-apk-${{ github.ref }}
@@ -96,9 +103,11 @@ jobs:
       - name: Prepare APK signing keystore
         env:
           SIGNING_KEYSTORE_B64: ${{ secrets.SIGNING_KEYSTORE_B64 }}
+          RELEASE_KEYSTORE_B64: ${{ secrets.RELEASE_KEYSTORE_B64 }}
         run: |
-          if [ -n "$SIGNING_KEYSTORE_B64" ]; then
-            printf '%s' "$SIGNING_KEYSTORE_B64" | base64 -d > app/release.keystore
+          KEYSTORE_B64="${SIGNING_KEYSTORE_B64:-$RELEASE_KEYSTORE_B64}"
+          if [ -n "$KEYSTORE_B64" ]; then
+            printf '%s' "$KEYSTORE_B64" | base64 -d > app/release.keystore
           elif [ ! -f app/release.keystore ]; then
             keytool -genkeypair -v \
               -keystore app/release.keystore \
@@ -189,3 +198,32 @@ jobs:
           path: dist/*.apk
           if-no-files-found: error
           retention-days: 30
+
+      - name: Publish APK to GitHub Release
+        if: ${{ (inputs.publish_release == null || inputs.publish_release) && (steps.cfg.outputs.build_type == 'release' || github.event_name == 'workflow_dispatch') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v${{ steps.cfg.outputs.version }}"
+          TITLE="Transcriber ${TAG}"
+          NOTES="Automated APK build for ${TAG} (variant: ${{ steps.cfg.outputs.variant }}, ABIs: ${{ steps.cfg.outputs.abis }}, build: ${{ steps.cfg.outputs.build_type }})."
+
+          git push --force origin "$GITHUB_SHA:refs/tags/${TAG}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "$TITLE" --notes "$NOTES"
+            gh release upload "$TAG" dist/*.apk --clobber
+          else
+            gh release create "$TAG" dist/*.apk \
+              --title "$TITLE" \
+              --notes "$NOTES"
+          fi
+
+          git push --force origin "$GITHUB_SHA:refs/tags/latest"
+          if gh release view latest >/dev/null 2>&1; then
+            gh release edit latest --title "$TITLE" --notes "$NOTES"
+            gh release upload latest dist/*.apk --clobber
+          else
+            gh release create latest dist/*.apk \
+              --title "$TITLE" \
+              --notes "$NOTES"
+          fi

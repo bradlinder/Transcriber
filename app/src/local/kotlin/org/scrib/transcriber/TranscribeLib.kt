@@ -73,10 +73,10 @@ class TranscribeVad private constructor(private var ptr: Long) {
     }
 
     companion object {
-        private const val THRESHOLD = 0.5f
-        private const val MIN_SPEECH_MS = 250
-        private const val MIN_SILENCE_MS = 100
-        private const val SPEECH_PAD_MS = 30
+        private const val THRESHOLD = 0.25f
+        private const val MIN_SPEECH_MS = 100
+        private const val MIN_SILENCE_MS = 500
+        private const val SPEECH_PAD_MS = 250
 
         private var loaded: TranscribeVad? = null
         private var loadedPath: String? = null

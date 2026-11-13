@@ -575,17 +575,32 @@ class GgmlTranscriptionEngine(private val appContext: Context) : TranscriptionEn
                 spans: List<VadSpan>
             ): RunAudio? {
                 val source = samples.duplicate().order(ByteOrder.nativeOrder()).asFloatBuffer()
-                val bounds = ArrayList<IntArray>(spans.size)
-                var kept = 0L
+                val rawBounds = ArrayList<IntArray>(spans.size)
                 for (span in spans) {
                     val from = (span.startMs * SAMPLE_RATE / 1000).toInt().coerceIn(0, sampleCount)
                     val to = (span.endMs * SAMPLE_RATE / 1000).toInt().coerceIn(from, sampleCount)
                     if (to > from) {
-                        bounds.add(intArrayOf(from, to))
-                        kept += to - from
+                        rawBounds.add(intArrayOf(from, to))
                     }
                 }
-                if (bounds.isEmpty() || kept >= sampleCount * 0.9) {
+                if (rawBounds.isEmpty()) return null
+
+                // Bridge short conversational pauses (<= 350ms) so soft syllables and breaths are not excised
+                val maxBridgeSamples = SAMPLE_RATE * 350 / 1000
+                val bounds = ArrayList<IntArray>(rawBounds.size)
+                for (b in rawBounds) {
+                    if (bounds.isNotEmpty() && b[0] - bounds.last()[1] <= maxBridgeSamples) {
+                        bounds.last()[1] = maxOf(bounds.last()[1], b[1])
+                    } else {
+                        bounds.add(b)
+                    }
+                }
+
+                var kept = 0L
+                for (b in bounds) {
+                    kept += b[1] - b[0]
+                }
+                if (kept >= sampleCount * 0.85) {
                     return null
                 }
                 val packed = ByteBuffer.allocateDirect((kept * 4).toInt()).order(ByteOrder.nativeOrder())
