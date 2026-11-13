@@ -5,7 +5,7 @@ Transcriber is an offline-first, privacy-focused Android application designed fo
 
 ---
 
-## 2. Near-Term Feature Set & Current Version (`v0.74`)
+## 2. Near-Term Feature Set & Current Version (`v0.76`)
 - **Native C++ Engine:** Powered by Scrib's C++ `transcribe.cpp` / `whisper.cpp` / `ggml` runtime.
 - **Sentence-Boundary Paragraph Breaking:** Automatically breaks paragraphs at sentence-ending punctuation (`.?!`) when the configurable word threshold is reached (default 70 words, adjustable from 20 to 200 words in Settings).
 - **Intelligent Sentence Fragment Merger:** Automatically attaches short, lowercase sentence fragments ($\le 2$ words, e.g. `"examples."`) to parent sentences before paragraph breaks.
@@ -359,6 +359,15 @@ Transcriber is an offline-first, privacy-focused Android application designed fo
 ### [x] Priority 54 (COMPLETED in v0.74): Neural `TimedWord` Preservation in `toSentences()` Without Audio Energy
 - **Overview:**
   - Fixed `toSentencesInternal` in `Transcript.kt` so segments carrying neural `seg.words` always route through `AcousticAligner.alignSentencesWithEnergy` even when `precomputedEnergy` is `null` (such as `.srt`/`.vtt` exports, paragraph formatting, and unit tests calling `segments.toSentences()`), preserving `TimedSentence.words` instead of dropping them to `emptyList()`.
+
+### [x] Priority 55 (COMPLETED in v0.75): Remove Unused Chaquopy Plugin & Safe Container Build Guards
+- **Overview:**
+  - Removed the unused `com.chaquo.python:gradle:15.0.1` plugin and `python {}` block from `build.gradle` and `app/build.gradle` (diarization and VAD run 100% natively in Kotlin + ONNX Runtime), resolving the `org/gradle/util/VersionNumber` error on Gradle 9.3.1 and eliminating Python 3.12 CI warnings and unused APK bloat.
+  - Added non-destructive environment checks in `app/build.gradle` so CI/F-Droid/NDK builds continue using SDK 35, NDK 27, `transcribe.cpp` CMake, and `release.keystore`, while NDK-less containers fall back cleanly to installed SDK 36 and debug signing.
+
+### [x] Priority 56 (COMPLETED in v0.76): Sync Static Web Preview Card to Live App Version
+- **Overview:**
+  - Updated `index.html` and `package.json` (`npm run dev`) so the port `3000` web preview displays the current app `versionName` directly from `app/build.gradle` (`v0.76`) instead of static status text.
 
 ---
 

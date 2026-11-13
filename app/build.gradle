@@ -1,7 +1,6 @@
 apply plugin: 'com.android.application'
 apply plugin: 'org.jetbrains.kotlin.android'
 apply plugin: 'org.jetbrains.kotlin.plugin.compose'
-apply plugin: 'com.chaquo.python'
 
 // Workaround for KGP friendPathsSet state lock error when invoked from IDE
 if (project.hasProperty('android.injected.invoked.from.ide')) {
@@ -24,18 +23,31 @@ def appName = 'Transcriber'
 def launcher = max ? 'ic_launcher_max' : remote ? 'ic_launcher_remote' : 'ic_launcher'
 def launcherRound = max ? 'ic_launcher_round_max' : remote ? 'ic_launcher_round_remote' : 'ic_launcher_round'
 
+def localProps = new Properties()
+def localPropsFile = rootProject.file('local.properties')
+if (localPropsFile.exists()) {
+    localPropsFile.withInputStream { localProps.load(it) }
+}
+def sdkRoot = System.getenv('ANDROID_HOME') ?: System.getenv('ANDROID_SDK_ROOT') ?: localProps.getProperty('sdk.dir') ?: '/opt/android/sdk'
+def useSdk36Fallback = !new File(sdkRoot, 'platforms/android-35').exists() && new File(sdkRoot, 'platforms/android-36').exists()
+def hasNativeSubmodule = file('../transcribe.cpp/CMakeLists.txt').exists()
+def hasNdkDir = new File(sdkRoot, 'ndk').exists()
+def enableNativeBuild = local && hasNativeSubmodule && hasNdkDir
+
 android {
     namespace 'org.scrib.transcriber'
-    compileSdk 35
-    buildToolsVersion '35.0.0'
-    ndkVersion '27.2.12479018'
+    compileSdk useSdk36Fallback ? 36 : 35
+    buildToolsVersion useSdk36Fallback ? '36.0.0' : '35.0.0'
+    if (hasNdkDir) {
+        ndkVersion '27.2.12479018'
+    }
 
     defaultConfig {
         applicationId "org.scrib.transcriber${suffix}"
         minSdk 26
         targetSdk 35
-        versionCode 74
-        versionName '0.74'
+        versionCode 76
+        versionName '0.76'
 
         resValue 'string', 'app_name', appName
 
@@ -52,7 +64,7 @@ android {
 
         // Remote has no native code of its own, so there is nothing for an abi filter to select
         // and nothing for a split to divide up.
-        if (local) {
+        if (enableNativeBuild) {
             ndk {
                 abiFilters.addAll(abis)
             }
@@ -73,23 +85,6 @@ android {
                 }
             }
         }
-
-        python {
-            def customBuildPython = findProperty('chaquopy.buildPython')?.toString()
-            if (customBuildPython) {
-                buildPython customBuildPython
-            } else if (System.getProperty('os.name').toLowerCase().contains('windows')) {
-                def winPython = "C:/Users/moonl/AppData/Local/Programs/Python/Python312/python.exe"
-                if (file(winPython).exists()) {
-                    buildPython winPython
-                }
-            }
-            version "3.8"
-            pip {
-                install "numpy"
-                install "soundfile"
-            }
-        }
     }
 
     buildFeatures {
@@ -99,7 +94,7 @@ android {
     }
 
 
-    if (local) {
+    if (enableNativeBuild) {
         externalNativeBuild {
             cmake {
                 path file('../transcribe.cpp/CMakeLists.txt')
@@ -131,12 +126,16 @@ android {
 
     buildTypes {
         release {
-            signingConfig signingConfigs.release
+            if (file("release.keystore").exists()) {
+                signingConfig signingConfigs.release
+            }
             minifyEnabled false
             debuggable false
         }
         debug {
-            signingConfig signingConfigs.release
+            if (file("release.keystore").exists()) {
+                signingConfig signingConfigs.release
+            }
             applicationIdSuffix '.debug'
             resValue 'string', 'app_name', "${appName} Debug"
         }

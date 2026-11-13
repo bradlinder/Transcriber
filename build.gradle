@@ -3,13 +3,11 @@ buildscript {
     repositories {
         google()
         mavenCentral()
-        maven { url "https://chaquo.com/maven" }
     }
     dependencies {
         classpath 'com.android.tools.build:gradle:8.13.2'
         classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
         classpath "org.jetbrains.kotlin:compose-compiler-gradle-plugin:$kotlin_version"
-        classpath "com.chaquo.python:gradle:15.0.1"
     }
 }
 
@@ -17,6 +15,5 @@ allprojects {
     repositories {
         google()
         mavenCentral()
-        maven { url "https://chaquo.com/maven" }
     }
 }
