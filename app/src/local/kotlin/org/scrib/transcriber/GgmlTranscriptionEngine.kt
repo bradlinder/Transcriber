@@ -59,9 +59,10 @@ class GgmlTranscriptionEngine(private val appContext: Context) : TranscriptionEn
             val abort = TranscribeAbort.create()
             try {
                 cancellation.onCancel { abort.cancel() }
+                val info = model().info
                 val live = session()
                 val audio = RunAudio.whole(samples, sampleCount)
-                val text = runUtterance(live, model()!!.info, audio, 0, sampleCount, language, abort).text
+                val text = runUtterance(live, info, audio, 0, sampleCount, language, abort).text
                 val spoken = live.detectedLanguage ?: language
                 TranscribedSegment(Dictionary.applyReplacements(appContext, text), spoken)
             } finally {
@@ -172,8 +173,8 @@ class GgmlTranscriptionEngine(private val appContext: Context) : TranscriptionEn
             val alreadyLoaded = loadedPath == activeKey && session != null
             val beforeLoad = processMemory(appContext)
             val loadStartedAt = SystemClock.elapsedRealtime()
+            val info = model().info
             val live = session()
-            val info = model()!!.info
             val afterLoad = processMemory(appContext)
             onModelLoad(
                 TranscriptionMetrics(
@@ -364,8 +365,8 @@ class GgmlTranscriptionEngine(private val appContext: Context) : TranscriptionEn
 
     @Synchronized
     private fun session(): TranscribeSession {
-        session?.let { return it }
         val loaded = model()
+        session?.let { return it }
         return loaded.openSession(CpuConfig.preferredThreadCount).also { session = it }
     }
 
@@ -576,17 +577,18 @@ class GgmlTranscriptionEngine(private val appContext: Context) : TranscriptionEn
             ): RunAudio? {
                 val source = samples.duplicate().order(ByteOrder.nativeOrder()).asFloatBuffer()
                 val rawBounds = ArrayList<IntArray>(spans.size)
+                val padSamples = SAMPLE_RATE * 350 / 1000
                 for (span in spans) {
-                    val from = (span.startMs * SAMPLE_RATE / 1000).toInt().coerceIn(0, sampleCount)
-                    val to = (span.endMs * SAMPLE_RATE / 1000).toInt().coerceIn(from, sampleCount)
+                    val from = ((span.startMs * SAMPLE_RATE / 1000).toInt() - padSamples).coerceIn(0, sampleCount)
+                    val to = ((span.endMs * SAMPLE_RATE / 1000).toInt() + padSamples).coerceIn(from, sampleCount)
                     if (to > from) {
                         rawBounds.add(intArrayOf(from, to))
                     }
                 }
                 if (rawBounds.isEmpty()) return null
 
-                // Bridge short conversational pauses (<= 350ms) so soft syllables and breaths are not excised
-                val maxBridgeSamples = SAMPLE_RATE * 350 / 1000
+                // Bridge conversational pauses (<= 800ms) and overlapping padded spans so quiet turn onsets/tails are preserved
+                val maxBridgeSamples = SAMPLE_RATE * 800 / 1000
                 val bounds = ArrayList<IntArray>(rawBounds.size)
                 for (b in rawBounds) {
                     if (bounds.isNotEmpty() && b[0] - bounds.last()[1] <= maxBridgeSamples) {

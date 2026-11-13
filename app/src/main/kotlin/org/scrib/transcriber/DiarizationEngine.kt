@@ -457,8 +457,14 @@ object DiarizationEngine {
 
                 val emb = extractSegmentEmbedding(session, env, normalizedAudio, sampleRate)
                 if (emb != null) {
-                    primaryEmbeddings.add(emb)
-                    validPrimaryChunks.add(chunk)
+                    if (hasVocalSyllabicModulation(rawSlice, sampleRate)) {
+                        primaryEmbeddings.add(emb)
+                        validPrimaryChunks.add(chunk)
+                    } else {
+                        // Non-speech / continuous music span: exclude from primary AHC cluster creation
+                        // so instrumental music never spawns phantom speaker clusters (e.g. Speaker 11).
+                        shortChunks.add(chunk)
+                    }
                 }
 
                 if (idx % 2 == 0 || idx == totalPrimary - 1) {
@@ -614,11 +620,16 @@ object DiarizationEngine {
             centroids[cId] = computeCentroid(indices.map { embeddings[it] })
         }
 
+        val totalPrimarySpeechMs = totalDurations.values.sum()
+        val effectiveMicroLimitMs = max(
+            maxMicroClusterDurationMs,
+            min(4_500L, (totalPrimarySpeechMs * 2L) / 100L)
+        )
         val maxReattachDistance = min(0.92f, sensitivityThreshold + 0.24f)
         val out = primaryLabels.clone()
         for ((cId, indices) in memberIndices) {
             val dur = totalDurations[cId] ?: 0L
-            if (dur >= maxMicroClusterDurationMs || cId in majorClusters) continue
+            if (dur >= effectiveMicroLimitMs || cId in majorClusters) continue
             val microCentroid = centroids[cId] ?: continue
 
             var bestMajor = -1
@@ -900,6 +911,44 @@ object DiarizationEngine {
             for (d in 0 until dim) centroid[d] = (sum[d] / norm).toFloat()
         }
         return centroid
+    }
+
+    /**
+     * Evaluates Short-Time Energy (STE) syllabic envelope modulation to distinguish
+     * articulated human speech (which exhibits deep inter-syllabic consonant/pause troughs)
+     * from continuous instrumental music pads, HVAC hum, or silence.
+     */
+    internal fun hasVocalSyllabicModulation(rawPcm: FloatArray, sampleRate: Int = 16000): Boolean {
+        if (rawPcm.size < FRAME_LEN) return false
+        var sumSq = 0.0
+        for (s in rawPcm) {
+            sumSq += (s * s).toDouble()
+        }
+        val rms = sqrt(sumSq / rawPcm.size).toFloat()
+        if (rms < 0.002f) return false
+
+        val ste = AcousticAligner.computeEnergyProfile(rawPcm, sampleRate)
+        if (ste.size < 10) return true
+
+        val sorted = ste.clone().also { it.sort() }
+        val p15 = sorted[(sorted.size * 0.15).toInt().coerceIn(0, sorted.lastIndex)]
+        val p90 = sorted[(sorted.size * 0.90).toInt().coerceIn(0, sorted.lastIndex)]
+        if (p90 < 1e-7f) return false
+
+        var mean = 0.0
+        for (e in ste) mean += e.toDouble()
+        mean /= ste.size
+        var variance = 0.0
+        for (e in ste) {
+            val d = e.toDouble() - mean
+            variance += d * d
+        }
+        val cv = if (mean > 1e-9) sqrt(variance / ste.size) / mean else 0.0
+
+        // Human speech has deep syllabic valleys (p15/p90 < 0.35) and high envelope modulation (cv >= 0.45).
+        // Continuous instrumental music or stationary noise stays continuously elevated without speech valleys.
+        val valleyRatio = p15 / p90
+        return valleyRatio < 0.35f && cv >= 0.45
     }
 
     // 85 Hz Highpass Filter + Active-Speech RMS Normalization for balanced dynamic range

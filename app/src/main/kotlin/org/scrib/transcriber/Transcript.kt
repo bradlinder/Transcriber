@@ -549,8 +549,10 @@ private fun List<TranscriptSegment>.toSentencesInternal(
             )
             val startsWithLower = sTrimmed.first().isLowerCase()
 
-            // If the preceding sentence ended mid-thought (no punctuation) OR this segment starts with lowercase (continuation across 30s window boundary), merge with last sentence
-            val shouldMerge = sameSpeaker && last != null && (!lastEndsWithPunct || startsWithLower)
+            // If the preceding sentence ended mid-thought (no punctuation) OR this segment starts with lowercase (continuation across 30s window boundary), merge with last sentence.
+            // Never merge across a multi-second acoustic gap (> 2000ms), preventing truncated speech from fusing with distant music/noise spans.
+            val temporalGapMs = if (last != null) s.startMs - last.endMs else Long.MAX_VALUE
+            val shouldMerge = sameSpeaker && last != null && temporalGapMs <= 2000L && (!lastEndsWithPunct || startsWithLower)
 
             if (shouldMerge) {
                 val stripTerminalPunct = startsWithLower && lastEndsWithPunct

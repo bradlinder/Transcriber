@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -23,9 +24,11 @@ import kotlinx.coroutines.launch
 class TranscriptionForegroundService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onCreate() {
         super.onCreate()
+        acquireWakeLock()
         createChannel()
         goForeground(notification(TranscriptionRun.state.value))
         scope.launch {
@@ -47,8 +50,32 @@ class TranscriptionForegroundService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        releaseWakeLock()
         scope.cancel()
         super.onDestroy()
+    }
+
+    private fun acquireWakeLock() {
+        try {
+            val pm = getSystemService(PowerManager::class.java) ?: return
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Transcriber:TranscriptionWakeLock").apply {
+                setReferenceCounted(false)
+                acquire(WAKE_LOCK_TIMEOUT_MS)
+            }
+        } catch (_: Throwable) {
+            // WakeLock failure must not abort foreground service startup
+        }
+    }
+
+    private fun releaseWakeLock() {
+        try {
+            if (wakeLock?.isHeld == true) {
+                wakeLock?.release()
+            }
+        } catch (_: Throwable) {
+        } finally {
+            wakeLock = null
+        }
     }
 
     // The type is only part of the call from Android 10 on, and mandatory from 14.
@@ -105,6 +132,7 @@ class TranscriptionForegroundService : Service() {
     companion object {
         private const val CHANNEL_ID = "transcription"
         private const val NOTIFICATION_ID = 1
+        private const val WAKE_LOCK_TIMEOUT_MS = 4 * 60 * 60 * 1000L
 
         fun start(context: Context) {
             val intent = Intent(context, TranscriptionForegroundService::class.java)

@@ -1004,4 +1004,67 @@ class DiarizationEngineTest {
             cutSample in (19.15 * sampleRate).toInt()..(19.57 * sampleRate).toInt()
         )
     }
+
+    @Test
+    fun testSteSyllabicModulationRejectsContinuousMusicAndAcceptsSpeech() {
+        val sampleRate = 16000
+        val numSamples = 2 * sampleRate // 2.0 seconds
+
+        // 1. Continuous instrumental music chord (440Hz + 554Hz + 659Hz at -16 dBFS, RMS ~ 0.15)
+        val musicPcm = FloatArray(numSamples) { i ->
+            val t = i.toDouble() / sampleRate
+            val chord = kotlin.math.sin(2.0 * Math.PI * 440.0 * t) +
+                0.8 * kotlin.math.sin(2.0 * Math.PI * 554.37 * t) +
+                0.6 * kotlin.math.sin(2.0 * Math.PI * 659.25 * t)
+            (chord * 0.08).toFloat()
+        }
+
+        // 2. Articulated human speech envelope (~4 Hz syllabic bursts separated by consonant/pause troughs)
+        val speechPcm = FloatArray(numSamples) { i ->
+            val t = i.toDouble() / sampleRate
+            val syllableEnv = maxOf(0.0, kotlin.math.sin(2.0 * Math.PI * 4.0 * t))
+            val carrier = kotlin.math.sin(2.0 * Math.PI * 220.0 * t) + 0.5 * kotlin.math.sin(2.0 * Math.PI * 660.0 * t)
+            (syllableEnv * carrier * 0.15).toFloat()
+        }
+
+        assertFalse(
+            "Continuous instrumental music pad must be rejected from primary voiceprint clustering",
+            DiarizationEngine.hasVocalSyllabicModulation(musicPcm, sampleRate)
+        )
+        assertTrue(
+            "Articulated speech with syllabic STE modulation must be accepted",
+            DiarizationEngine.hasVocalSyllabicModulation(speechPcm, sampleRate)
+        )
+    }
+
+    @Test
+    fun testAbsorbTransientAutoMicroClustersScalesWithLongRecordings() {
+        fun makeVec(angleDeg: Double): FloatArray {
+            val rad = Math.toRadians(angleDeg)
+            return floatArrayOf(kotlin.math.cos(rad).toFloat(), kotlin.math.sin(rad).toFloat(), 0f, 0f)
+        }
+
+        // Two major speakers (120s each) + one 2.56s two-chunk phantom cluster close to Speaker 0
+        val labels = intArrayOf(0, 0, 1, 1, 2, 2)
+        val durations = listOf(60_000L, 60_000L, 60_000L, 60_000L, 1_040L, 1_520L)
+        val embeddings = listOf(
+            makeVec(0.0),
+            makeVec(2.0),
+            makeVec(90.0),
+            makeVec(92.0),
+            makeVec(15.0),
+            makeVec(18.0)
+        )
+
+        val refined = DiarizationEngine.absorbTransientAutoMicroClusters(
+            primaryLabels = labels,
+            chunkDurationsMs = durations,
+            embeddings = embeddings,
+            expectedSpeakers = "auto",
+            sensitivityThreshold = 0.55f
+        )
+
+        assertEquals("Phantom 2.56s cluster in long recording must absorb into Speaker 0", 0, refined[4])
+        assertEquals("Phantom 2.56s cluster in long recording must absorb into Speaker 0", 0, refined[5])
+    }
 }
