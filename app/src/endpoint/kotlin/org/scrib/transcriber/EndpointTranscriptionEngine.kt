@@ -156,7 +156,7 @@ class EndpointTranscriptionEngine(
         return capabilities
     }
 
-    private fun segments(transcript: Transcript, audioDurationMs: Long): List<TranscriptSegment> {
+    private fun segments(transcript: EndpointTranscript, audioDurationMs: Long): List<TranscriptSegment> {
         val text = transcript.text.trim()
         val words = transcript.words
         if (words.isEmpty()) {

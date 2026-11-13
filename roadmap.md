@@ -5,7 +5,7 @@ Transcriber is an offline-first, privacy-focused Android application designed fo
 
 ---
 
-## 2. Near-Term Feature Set & Current Version (`v0.71`)
+## 2. Near-Term Feature Set & Current Version (`v0.72`)
 - **Native C++ Engine:** Powered by Scrib's C++ `transcribe.cpp` / `whisper.cpp` / `ggml` runtime.
 - **Sentence-Boundary Paragraph Breaking:** Automatically breaks paragraphs at sentence-ending punctuation (`.?!`) when the configurable word threshold is reached (default 70 words, adjustable from 20 to 200 words in Settings).
 - **Intelligent Sentence Fragment Merger:** Automatically attaches short, lowercase sentence fragments ($\le 2$ words, e.g. `"examples."`) to parent sentences before paragraph breaks.
@@ -344,6 +344,11 @@ Transcriber is an offline-first, privacy-focused Android application designed fo
   - Upgraded `SherpaTranscriptionEngine` (`parakeet-onnx` and other Sherpa models) with `AcousticAligner.planPauseSnappedWindowRanges` (`24s–30s` STE pause cuts replacing blind `30s` slices), neural token/word timestamps extracted via shared `AcousticAligner.assembleSubwordTokensToWords`, tuned `SileroVadModelConfig` thresholds (`0.25f`, `0.50s` min silence, `0.10s` min speech, `28.0s` max span), and `transcribeDecodedToSegments` support.
   - Added `DiarizationEngine.absorbTransientAutoMicroClusters` so isolated `< 2.0s` single-utterance backchannels in `Auto` mode consolidate into their closest established (`>= 8.0s`) speaker centroid while preserving genuine soundbite speakers (`>= 2.0s`).
   - Updated `.github/workflows/build-apk.yml` to build and publish both `scrib` and `max` APKs cleanly on push.
+
+### [x] Priority 52 (COMPLETED in v0.72): Max & Remote Variant Compilation Fix (`EndpointWordTiming` / `EndpointTranscript`)
+- **Overview:**
+  - Resolved the `org.scrib.transcriber.WordTiming` top-level Kotlin redeclaration between `Transcript.kt` and `CloudflareTransport.kt` that surfaced when building `-PwithSherpa` (`max`) or `-PwithRemote` (`remote`).
+  - Renamed endpoint transport DTOs to `EndpointWordTiming` and `EndpointTranscript` across `CloudflareTransport.kt`, `OpenAiTransport.kt`, and `EndpointTranscriptionEngine.kt`.
 
 ---
 

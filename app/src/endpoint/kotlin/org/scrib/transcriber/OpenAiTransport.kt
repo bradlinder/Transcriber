@@ -19,7 +19,7 @@ class OpenAiTransport : EndpointTransport {
         languageHint: String?,
         prompt: String?,
         cancellation: CancellationToken?
-    ): Transcript {
+    ): EndpointTranscript {
         val boundary = "----ScribBoundary${java.util.UUID.randomUUID().toString().replace("-", "")}"
         val url = settings.transcriptionsUrl
         val connection = EndpointHttp.open(url, settings.apiKey)
@@ -59,7 +59,7 @@ class OpenAiTransport : EndpointTransport {
                 throw EndpointException(EndpointHttp.openAiErrors(body, status, url))
             }
             val json = EndpointHttp.json(body, url)
-            return Transcript(text = json.optString("text"))
+            return EndpointTranscript(text = json.optString("text"))
         } catch (e: CancelledException) {
             throw e
         } catch (e: EndpointException) {

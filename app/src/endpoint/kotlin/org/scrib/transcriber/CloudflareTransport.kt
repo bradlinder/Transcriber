@@ -12,15 +12,15 @@ interface EndpointTransport {
         languageHint: String?,
         prompt: String?,
         cancellation: CancellationToken?
-    ): Transcript
+    ): EndpointTranscript
 }
 
-data class Transcript(
+data class EndpointTranscript(
     val text: String,
-    val words: List<WordTiming> = emptyList()
+    val words: List<EndpointWordTiming> = emptyList()
 )
 
-data class WordTiming(val word: String, val startMs: Long, val endMs: Long)
+data class EndpointWordTiming(val word: String, val startMs: Long, val endMs: Long)
 
 val CLOUDFLARE_WHISPER_MODELS = listOf(
     "@cf/openai/whisper",
@@ -40,7 +40,7 @@ class CloudflareTransport : EndpointTransport {
         languageHint: String?,
         prompt: String?,
         cancellation: CancellationToken?
-    ): Transcript {
+    ): EndpointTranscript {
         val account = settings.accountId
         val customBase = if (account.startsWith("http://") || account.startsWith("https://")) {
             account.trimEnd('/')
@@ -87,7 +87,7 @@ class CloudflareTransport : EndpointTransport {
 
             val result = json.optJSONObject("result")
                 ?: throw EndpointException("Cloudflare sent no result: ${EndpointHttp.preview(body)}")
-            return Transcript(
+            return EndpointTranscript(
                 text = result.optString("text"),
                 words = parseWords(result.optJSONArray("words"))
             )
@@ -102,11 +102,11 @@ class CloudflareTransport : EndpointTransport {
         }
     }
 
-    private fun parseWords(array: org.json.JSONArray?): List<WordTiming> {
+    private fun parseWords(array: org.json.JSONArray?): List<EndpointWordTiming> {
         if (array == null) {
             return emptyList()
         }
-        val words = ArrayList<WordTiming>(array.length())
+        val words = ArrayList<EndpointWordTiming>(array.length())
         for (i in 0 until array.length()) {
             val entry = array.optJSONObject(i) ?: continue
             val word = entry.optString("word")
@@ -114,7 +114,7 @@ class CloudflareTransport : EndpointTransport {
                 continue
             }
             words.add(
-                WordTiming(
+                EndpointWordTiming(
                     word = word,
                     startMs = (entry.optDouble("start", 0.0) * 1000.0).toLong(),
                     endMs = (entry.optDouble("end", 0.0) * 1000.0).toLong()
