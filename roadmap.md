@@ -5,7 +5,7 @@ Transcriber is an offline-first, privacy-focused Android application designed fo
 
 ---
 
-## 2. Near-Term Feature Set & Current Version (`v0.82`)
+## 2. Near-Term Feature Set & Current Version (`v0.83`)
 - **Native C++ Engine:** Powered by Scrib's C++ `transcribe.cpp` / `whisper.cpp` / `ggml` runtime.
 - **Sentence-Boundary Paragraph Breaking:** Automatically breaks paragraphs at sentence-ending punctuation (`.?!`) when the configurable word threshold is reached (default 70 words, adjustable from 20 to 200 words in Settings).
 - **Intelligent Sentence Fragment Merger:** Automatically attaches short, lowercase sentence fragments ($\le 2$ words, e.g. `"examples."`) to parent sentences before paragraph breaks.
@@ -368,6 +368,11 @@ Transcriber is an offline-first, privacy-focused Android application designed fo
 ### [x] Priority 56 (COMPLETED in v0.76): Sync Static Web Preview Card to Live App Version
 - **Overview:**
   - Updated `index.html` and `package.json` (`npm run dev`) so the port `3000` web preview displays the current app `versionName` directly from `app/build.gradle` (`v0.76`) instead of static status text.
+
+### [x] Priority 57 (COMPLETED in v0.83): Remove Unused Web Preview Stubs & Document Native-Only Policy
+- **Overview:**
+  - Added Rule 7 (`NO WEB PREVIEW / NO DEV SERVER MAINTENANCE`) to `GEMINI.md` so AI coding sessions treat the workspace strictly as a native Android project and do not spend tokens maintaining or debugging a web preview server.
+  - Removed unused web preview placeholder files (`package.json`, `index.html`, `vite.config.ts`) from the repository root.
 
 ---
 

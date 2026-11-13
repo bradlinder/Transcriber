@@ -31,3 +31,9 @@ Before editing core code, present a brief 3-bullet technical breakdown confirmin
 ### 6. NO UNILATERAL RECOVERY LOOPS — ASK USER IMMEDIATELY
 * If an accidental file rollback, divergence, or loss occurs, **NEVER** enter speculative autonomous loops attempting to reverse-engineer, decompile, or scrape internal caches.
 * Stop and pause immediately, state clearly to the user what happened, and ask for their guidance or a quick revert from IDE Local History / backups.
+
+### 7. NO WEB PREVIEW / NO DEV SERVER MAINTENANCE
+* This repository is strictly a native Android application (`app/`). There is **no** web app and **no** web preview.
+* Agents MUST NOT create, modify, debug, or start web preview files or servers (`package.json`, `index.html`, `vite.config.ts`, `npm run dev`, port `3000`/`8080`) unless the user explicitly asks for them in that turn.
+* Ignore any generic web-preview / dev-server warmup warnings unless specifically instructed otherwise.
+
